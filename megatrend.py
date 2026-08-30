@@ -40,9 +40,9 @@ Fixes here:
     (70.8 KB -> ~30 KB per monitor table, sent to the browser every rerun).
   * `html.escape` on every interpolated value (the original was injectable).
 
-Not changed on purpose: zone thresholds, colours, level data, wording, the tab
-layout. `dcf_fair_value` keeps its single-stage formula by default; the
-two-stage fade model is opt-in from the sidebar because it changes numbers.
+Zone thresholds, colours and wording kept. Level data updated only where the
+25 Aug sheet / Briefs published a number that was previously blank. Tab layout
+expanded in v3 (Market Overview, Crypto, EGF, Big Picture).
 
 VERSION 2 CHANGES (requested after review)
 -----------------------------------------
@@ -63,7 +63,23 @@ VERSION 2 CHANGES (requested after review)
     substitute a default. Missing data renders as an em-dash and is counted in
     the status line — it is never back-filled, smoothed or simulated.
 
-Run:  pip install yfinance streamlit  &&  streamlit run ai_stocks_monitor_v2.py
+
+VERSION 3 CHANGES
+-----------------
+  * Stocks sorted alphabetically by ticker in 10X Brigade, Portfolio, and
+    Fundamentals (user request).
+  * Missing buy / take-profit levels filled from the 25 Aug 2026 portfolio
+    sheet and Stocks Briefs where Nadeem published numbers (TMO $400–$450,
+    BHP/CCJ/ALB/FCX/OXY/SLB/FSLR/UNH/MSTR/SNPS/PINS, etc.). No invented
+    levels — names still without a published range stay blank.
+  * MPW / RDFN remain excluded (delisted). No top-of-page warning for
+    names still missing buy zones (user will fill as found).
+  * New tabs: Market Overview (upcoming earnings, week lookback, sentiment),
+    Crypto, EGF, Big Picture — each with how-to-use analysis guidance drawn
+    from Walayat's sheets. Tab order: Monitor | Market Overview | Crypto |
+    EGF | Fundamentals | Big Picture | Rules.
+
+Run:  pip install yfinance streamlit  &&  streamlit run ai_stocks_monitor_v3.py
 """
 
 from __future__ import annotations
@@ -106,6 +122,8 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 QUOTE_TTL_S = 60 * 90          # a snapshot is authoritative until the next slot
 ATH_TTL_S = 12 * 3600          # running maximum moves slowly
 FUND_TTL_S = 24 * 3600         # fundamentals refresh once per day
+OVERVIEW_TTL_S = 60 * 60       # benchmarks / earnings / week lookback
+CRYPTO_TTL_S = 60 * 30         # spot crypto
 ATH_INCREMENTAL_LOOKBACK_DAYS = 30
 
 # Network policy. Yahoo rate-limits aggressively; fewer workers + backoff beats
@@ -212,153 +230,594 @@ def ms_until_next_snapshot(now: Optional[pd.Timestamp] = None) -> int:
 # and 10-year targets exactly as published. No trim levels: long-run
 # accumulation plays. BESI is Amsterdam-listed (€) — static, not monitored.
 # =============================================================================
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # ⭐ 10X BRIGADE — hard-coded top & center (17 Jul 2026 article). Buy ranges
 # and 10-year targets exactly as published. No trim levels: long-run
 # accumulation plays. BESI is Amsterdam-listed (€) — static, not monitored.
-# ═══════════════════════════════════════════════════════════════════════════════
+# Sorted alphabetically by ticker (v3).
+# =============================================================================
 BRIGADE = [
-    dict(t="CRM",   name="Salesforce",   buy_lo=130.0,  buy_hi=163.0,  target="720",
-         note="[A comment] '$230 pumping', trim level asked — unanswered; exposure 125%."),
-    dict(t="CRCL",  name="Circle",       buy_lo=50.0,   buy_hi=66.0,   target="640",
-         note="[TW] trimming cryptos; exposure 126%."),
-    dict(t="BESI",  name="BESI",         buy_lo=145.0,  buy_hi=194.0,  target="2000", static=True,
-         note="Amsterdam-listed (€192.10 on the sheet) — not US, not live-monitored."),
-    dict(t="DUOL",  name="Duolingo",     buy_lo=65.0,   buy_hi=105.0,  target="800",
-         note="Exposure 48%."),
-    dict(t="NOW",   name="ServiceNow",   buy_lo=68.0,   buy_hi=98.0,   target="1040",
-         note="[TW] small sells; exposure 96%."),
-    dict(t="NVO",   name="Novo Nordisk", buy_lo=35.0,   buy_hi=48.0,   target="250",
-         note="[TW 11 Aug] in buying range; exposure 58%."),
-    dict(t="FICO",  name="Fair Isaac",   buy_lo=830.0,  buy_hi=1170.0, target="6250",
-         note="[TW 11 Aug] in buying range; exposure 124%."),
-    dict(t="INTU",  name="Intuit",       buy_lo=235.0,  buy_hi=292.0,  target="1455",
-         note="[TW] small sells; exposure 109%."),
-    dict(t="VEEV",  name="Veeva",        buy_lo=138.0,  buy_hi=166.0,  target="1000",
-         note="[TW] big sell 8% + trims; exposure 90%."),
-    dict(t="ADBE",  name="Adobe",        buy_lo=190.0,  buy_hi=235.0,  target="1400",
-         note="Exposure 137%."),
-    dict(t="CLX",   name="Clorox",       buy_lo=82.0,   buy_hi=93.0,   target="480"),
-    dict(t="SMCI",  name="SMCI",         buy_lo=18.0,   buy_hi=24.0,   target="240",
-         note="Exposure 19%."),
-    dict(t="QBTS",  name="QBTS",         buy_lo=4.0,    buy_hi=8.0,    target="98"),
-    dict(t="PATH",  name="PATH",         buy_lo=8.0,    buy_hi=12.0,   target="120",
-         note="[TW 18 Aug] small sell."),
+    dict(t='ADBE', name='Adobe', buy_lo=190.0, buy_hi=235.0, target='1400', note='Exposure 137%.'),
+    dict(
+        t='BESI',
+        name='BESI',
+        buy_lo=145.0,
+        buy_hi=194.0,
+        target='2000',
+        static=True,
+        note='Amsterdam-listed (€192.10 on the sheet) — not US, not live-monitored.',
+    ),
+    dict(t='CLX', name='Clorox', buy_lo=82.0, buy_hi=93.0, target='480'),
+    dict(
+        t='CRCL',
+        name='Circle',
+        buy_lo=50.0,
+        buy_hi=66.0,
+        target='640',
+        note='[TW] trimming cryptos; exposure 126%. Sheet trim $124–$138.',
+    ),
+    dict(
+        t='CRM',
+        name='Salesforce',
+        buy_lo=130.0,
+        buy_hi=163.0,
+        target='720',
+        note="[A comment] '$230 pumping', trim level asked — unanswered; exposure 125%.",
+    ),
+    dict(t='DUOL', name='Duolingo', buy_lo=65.0, buy_hi=105.0, target='800', note='Exposure 48%.'),
+    dict(
+        t='FICO',
+        name='Fair Isaac',
+        buy_lo=830.0,
+        buy_hi=1170.0,
+        target='6250',
+        note='[TW 11 Aug] in buying range; exposure 124%.',
+    ),
+    dict(
+        t='INTU',
+        name='Intuit',
+        buy_lo=235.0,
+        buy_hi=292.0,
+        target='1455',
+        note='[TW] small sells; exposure 109%.',
+    ),
+    dict(
+        t='NOW',
+        name='ServiceNow',
+        buy_lo=68.0,
+        buy_hi=98.0,
+        target='1040',
+        note='[TW] small sells; exposure 96%.',
+    ),
+    dict(
+        t='NVO',
+        name='Novo Nordisk',
+        buy_lo=35.0,
+        buy_hi=48.0,
+        target='250',
+        note='[TW 11 Aug] in buying range; exposure 58%.',
+    ),
+    dict(t='PATH', name='PATH', buy_lo=8.0, buy_hi=12.0, target='120', note='[TW 18 Aug] small sell.'),
+    dict(t='QBTS', name='QBTS', buy_lo=4.0, buy_hi=8.0, target='98'),
+    dict(t='SMCI', name='SMCI', buy_lo=18.0, buy_hi=24.0, target='240', note='Exposure 19%.'),
+    dict(
+        t='VEEV',
+        name='Veeva',
+        buy_lo=138.0,
+        buy_hi=166.0,
+        target='1000',
+        note='[TW] big sell 8% + trims; exposure 90%.',
+    ),
 ]
 BRIGADE_NOTE = ("Special section from the 17 Jul 2026 '10x Stocks to Accumulate' article • "
                 "brigade +24.5% since mid-July • no trim levels — long-run accumulation "
-                "(GREEN = in buying range, WHITE = within 10% of the top).")
+                "(GREEN = in buying range, WHITE = within 10% of the top). "
+                "Sorted A–Z by ticker.")
 
 # =============================================================================
-# MAIN LIST — ONE table: latest-article stocks first (26 Aug order), then the
-# Trade Wind mention, the portfolio sheet (25 Aug), Stocks Briefs additions,
-# then small positions. Brigade tickers are NOT repeated here. `note` fields
-# are provenance for maintenance only — NOT rendered.
+# MAIN LIST — portfolio sheet + article + briefs. Sorted A–Z by ticker (v3).
+# Missing buy/trim filled ONLY from published 25 Aug sheet / Stocks Briefs.
+# Brigade tickers are NOT repeated here. `note` = provenance, not rendered.
 # =============================================================================
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN LIST — ONE table: latest-article stocks first (26 Aug order), then the
-# Trade Wind mention, the portfolio sheet (25 Aug), Stocks Briefs additions,
-# then small positions. Brigade tickers are NOT repeated here. `note` fields
-# are provenance for maintenance only — NOT rendered.
-# ═══════════════════════════════════════════════════════════════════════════════
 STOCKS = [
-    # ── most recent article first (26 Aug order) ──────────────────────────────
-    dict(t="AVGO", name="Broadcom", buy_lo=272.0, buy_hi=336.0, trim=495.0,
-         mech="Only at ATH", target="470–500+",
-         note="[A] support $355 — break targets $300/$288. [CSV] trim ATH 495."),
-    dict(t="NVDA", name="NVIDIA", buy_lo=174.0, buy_hi=190.6, trim=219.0,
-         mech="Author ladder", target="~275",
-         note="[A 26 Aug] buys 190.6/188/186/181/177/174, sells 219/226/231/236/248."),
-    dict(t="META", name="META", buy_lo=360.0, buy_hi=548.0, trim=717.0,
-         mech="Within 10% of High", target="~730",
-         note="[A] 450s → below 400 → as low as 360 (puke case 240)."),
-    dict(t="AMD", name="AMD", buy_lo=180.0, buy_hi=300.0, trim=585.0,
-         mech="Only at ATH", target="600",
-         note="[A] won't add much above $300; dream drop $200."),
-    dict(t="TSM", name="TSMC", buy_lo=315.0, buy_hi=390.0, trim=479.0,
-         mech="Only at ATH", target=">500",
-         note="[A] lightly adding sub 390, sweet spot ~330, support 315."),
-    dict(t="ASML", name="ASML", buy_lo=1000.0, buy_hi=1326.0, trim=1900.0,
-         mech="Within 5% of High", target=">2150",
-         note="[A] 1300 then getting-lucky 1000."),
-    dict(t="GOOG", name="Google", buy_lo=240.0, buy_hi=292.0, trim=404.0,
-         mech="Only at ATH", target="430",
-         note="[A] support 332 — break targets 300/272/240."),
-    dict(t="MSFT", name="Microsoft", buy_lo=336.0, buy_hi=400.0, trim=500.0,
-         mech="Within 10% of High", target="600",
-         note="[A] buying opp toward 400, below = getting lucky."),
-    dict(t="BIDU", name="Baidu", buy_lo=88.0, buy_hi=108.0, trim=None,
-         note="[A] 'buy the dumps such as BIDU'; 18 Aug mega buys to $88."),
-    dict(t="MRNA", name="Moderna", buy_lo=None, buy_hi=None, trim=None,
-         note="[A] 'sell the pumps' — sold 70% into the 3x pop. No levels."),
-    # ── Trade Wind mention ────────────────────────────────────────────────────
-    dict(t="FCX", name="Freeport-McMoRan", buy_lo=None, buy_hi=50.0, trim=None,
-         note="[TW 11 Aug] trim zone. [B] accumulate sub $50."),
-    # ── portfolio sheet (25 Aug) ──────────────────────────────────────────────
-    dict(t="QCOM", name="Qualcomm", buy_lo=122.0, buy_hi=152.0, trim=234.0, mech="Within 10% of High"),
-    dict(t="LRCX", name="Lam Research", buy_lo=138.0, buy_hi=202.0, trim=417.0, mech="Within 5% of High"),
-    dict(t="IBM", name="IBM", buy_lo=168.0, buy_hi=208.0, trim=299.0, mech="Within 10% of High"),
-    dict(t="KLAC", name="KLAC", buy_lo=90.0, buy_hi=132.0, trim=292.0, mech="Within 5% of High"),
-    dict(t="AMAT", name="AMAT", buy_lo=202.0, buy_hi=276.0, trim=703.0, mech="Within 5% of High"),
-    dict(t="AMZN", name="Amazon", buy_lo=152.0, buy_hi=201.0, trim=258.0, mech="Within 10% of High"),
-    dict(t="MU", name="Micron", buy_lo=132.0, buy_hi=312.0, trim=1192.0, mech="Within 5% of High"),
-    dict(t="INTC", name="Intel", buy_lo=28.0, buy_hi=60.0, trim=135.0, mech="Within 5% of High"),
-    dict(t="TSLA", name="Tesla", buy_lo=172.0, buy_hi=286.0, trim=449.0, mech="Within 10% of High"),
-    dict(t="AAPL", name="Apple", buy_lo=190.0, buy_hi=226.0, trim=310.0, mech="Within 10% of High"),
-    dict(t="LMT", name="Lockheed Martin", buy_lo=422.0, buy_hi=458.0, trim=623.0, mech="Within 10% of High"),
-    dict(t="RTX", name="RTX", buy_lo=116.0, buy_hi=144.0, trim=204.0, mech="Within 10% of High"),
-    dict(t="ARW", name="Arrow Electronics", buy_lo=106.0, buy_hi=132.0, trim=214.0, mech="Within 10% of High"),
-    dict(t="FLEX", name="FLEX", buy_lo=42.0, buy_hi=70.0, trim=150.0, mech="Within 10% of High"),
-    dict(t="GPN", name="GPN", buy_lo=62.0, buy_hi=68.0, trim=None),
-    dict(t="JBL", name="Jabil", buy_lo=180.0, buy_hi=238.0, trim=386.0, mech="Within 10% of High"),
-    dict(t="WDC", name="Western Digital", buy_lo=156.0, buy_hi=252.0, trim=720.0, mech="Within 10% of High"),
-    dict(t="DIOD", name="Diodes", buy_lo=42.0, buy_hi=66.0, trim=113.0, mech="Within 10% of High"),
-    dict(t="ON", name="ON Semiconductor", buy_lo=38.0, buy_hi=62.0, trim=121.0, mech="Within 10% of High"),
-    dict(t="TAK", name="Takeda", buy_lo=12.0, buy_hi=13.0, trim=None),
-    dict(t="ADSK", name="Autodesk", buy_lo=186.0, buy_hi=202.0, trim=310.0, mech="Within 10% of High"),
-    dict(t="CRUS", name="Cirrus Logic", buy_lo=98.0, buy_hi=126.0, trim=162.0, mech="Within 10% of High"),
-    dict(t="GFS", name="GlobalFoundries", buy_lo=32.0, buy_hi=48.0, trim=83.0, mech="Within 10% of High"),
-    dict(t="HPQ", name="HP", buy_lo=16.0, buy_hi=18.6, trim=28.0, mech="$28–30"),
-    dict(t="LOGI", name="Logitech", buy_lo=66.0, buy_hi=86.0, trim=126.0, mech="Within 10% of High"),
-    dict(t="INMD", name="InMode", buy_lo=12.0, buy_hi=14.0, trim=None),
-    dict(t="ULH", name="ULH", buy_lo=12.6, buy_hi=14.6, trim=None),
-    dict(t="JNJ", name="JnJ", buy_lo=154.0, buy_hi=182.0, trim=249.0, mech="Within 10% of High"),
-    dict(t="ABBV", name="AbbVie", buy_lo=155.0, buy_hi=167.0, trim=241.0, mech="Within 10% of High"),
-    dict(t="PFE", name="Pfizer", buy_lo=22.0, buy_hi=24.3, trim=None),
-    dict(t="FOR", name="Forestar", buy_lo=15.0, buy_hi=20.0, trim=37.0, mech="Within 10% of High"),
-    dict(t="IIPR", name="IIPR", buy_lo=38.0, buy_hi=44.0, trim=None),
-    dict(t="MPW", name="MPW", buy_lo=3.2, buy_hi=4.0, trim=None),
-    dict(t="RDFN", name="Redfin", buy_lo=10.0, buy_hi=12.3, trim=None),
-    dict(t="BABA", name="Alibaba", buy_lo=84.0, buy_hi=106.0, trim=None),
-    dict(t="TCEHY", name="Tencent", buy_lo=40.0, buy_hi=55.0, trim=89.0, mech="Within 10% of High"),
-    dict(t="MGNI", name="Magnite", buy_lo=8.6, buy_hi=11.6, trim=20.0, mech="$20–24"),
-    dict(t="RBLX", name="Roblox", buy_lo=33.0, buy_hi=41.0, trim=60.0, mech="$60–69"),
-    dict(t="SYNA", name="SYNA", buy_lo=46.0, buy_hi=70.0, trim=None),
-    dict(t="DOCU", name="Docusign", buy_lo=40.0, buy_hi=45.0, trim=None),
-    dict(t="CRSP", name="CRISPR", buy_lo=34.0, buy_hi=41.0, trim=None),
-    dict(t="CSGP", name="CoStar", buy_lo=28.0, buy_hi=33.6, trim=None),
-    dict(t="COIN", name="Coinbase", buy_lo=112.0, buy_hi=148.0, trim=211.0, mech="$211–232"),
-    # ── Stocks Briefs additions ───────────────────────────────────────────────
-    dict(t="OXY", name="Occidental", buy_lo=40.0, buy_hi=74.0, trim=None,
-         note="[B] range trade $74–$40."),
-    dict(t="SLB", name="SLB", buy_lo=32.0, buy_hi=60.0, trim=None,
-         note="[B] $60–$32 range."),
-    dict(t="FSLR", name="First Solar", buy_lo=None, buy_hi=200.0, trim=None,
-         note="[B] accumulate; sub $200 is getting lucky."),
-    dict(t="CCJ", name="Cameco", buy_lo=None, buy_hi=None, trim=None, note="[B] buy deep dip."),
-    dict(t="BHP", name="BHP", buy_lo=None, buy_hi=None, trim=None, note="US ADR — briefs watch."),
-    dict(t="ALB", name="Albemarle", buy_lo=None, buy_hi=None, trim=None, note="Briefs watch."),
-    # ── small positions (price watch only) ────────────────────────────────────
-    dict(t="AEHR", name="AEHR"),
-    dict(t="AMT", name="American Tower"),
-    dict(t="BKNG", name="Booking"),
-    dict(t="GSK", name="GSK"),
-    dict(t="PINS", name="Pinterest"),
-    dict(t="SNAP", name="Snap"),
-    dict(t="SNPS", name="Synopsys"),
-    dict(t="TMO", name="Thermo Fisher"),
-    dict(t="TOELY", name="Tokyo Electron"),
-    dict(t="V", name="Visa"),
+    dict(
+        t='AAPL',
+        name='Apple',
+        buy_lo=190.0,
+        buy_hi=226.0,
+        trim=310.0,
+        mech='Within 10% of High',
+        section='Secondary',
+    ),
+    dict(
+        t='ABBV',
+        name='AbbVie',
+        buy_lo=155.0,
+        buy_hi=167.0,
+        trim=241.0,
+        mech='Within 10% of High',
+        section='Healthcare',
+    ),
+    dict(
+        t='ADSK',
+        name='Autodesk',
+        buy_lo=186.0,
+        buy_hi=202.0,
+        trim=310.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
+    dict(t='AEHR', name='AEHR', section='Watch'),
+    dict(
+        t='ALB',
+        name='Albemarle',
+        buy_lo=60.0,
+        buy_hi=90.0,
+        trim=230.0,
+        mech='$206',
+        section='Climate',
+        note='[Sheet 25 Aug] buy $60–$90, trim $230.',
+    ),
+    dict(
+        t='AMAT',
+        name='AMAT',
+        buy_lo=202.0,
+        buy_hi=276.0,
+        trim=703.0,
+        mech='Within 5% of High',
+        section='Secondary',
+    ),
+    dict(
+        t='AMD',
+        name='AMD',
+        buy_lo=180.0,
+        buy_hi=300.0,
+        trim=585.0,
+        mech='Only at ATH',
+        target='600',
+        section='Primary',
+        note="[A] won't add much above $300; dream drop $200. Sheet buy $180–$260.",
+    ),
+    dict(t='AMT', name='American Tower', section='Watch'),
+    dict(
+        t='AMZN',
+        name='Amazon',
+        buy_lo=152.0,
+        buy_hi=201.0,
+        trim=258.0,
+        mech='Within 10% of High',
+        section='Secondary',
+    ),
+    dict(
+        t='ARW',
+        name='Arrow Electronics',
+        buy_lo=106.0,
+        buy_hi=132.0,
+        trim=214.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
+    dict(
+        t='ASML',
+        name='ASML',
+        buy_lo=1000.0,
+        buy_hi=1326.0,
+        trim=1900.0,
+        mech='Within 5% of High',
+        target='>2150',
+        section='Primary',
+        note='[A] 1300 then getting-lucky 1000.',
+    ),
+    dict(
+        t='AVGO',
+        name='Broadcom',
+        buy_lo=272.0,
+        buy_hi=336.0,
+        trim=495.0,
+        mech='Only at ATH',
+        target='470–500+',
+        section='Primary',
+        note='[A] support $355 — break targets $300/$288. [CSV] trim ATH 495.',
+    ),
+    dict(t='BABA', name='Alibaba', buy_lo=84.0, buy_hi=106.0, trim=None, section='High Risk'),
+    dict(
+        t='BHP',
+        name='BHP',
+        buy_lo=54.0,
+        buy_hi=64.0,
+        trim=89.0,
+        mech='Within 10% of High',
+        section='Climate',
+        note='[Sheet 25 Aug] buy $54–$64, trim $89.',
+    ),
+    dict(
+        t='BIDU',
+        name='Baidu',
+        buy_lo=88.0,
+        buy_hi=108.0,
+        trim=None,
+        section='Medium Risk',
+        note="[A] 'buy the dumps such as BIDU'; 18 Aug mega buys to $88.",
+    ),
+    dict(
+        t='BKNG',
+        name='Booking',
+        buy_lo=None,
+        buy_hi=None,
+        trim=None,
+        section='Other',
+        note='[B] accumulate on dips, trim pumps — no published numeric range.',
+    ),
+    dict(
+        t='CCJ',
+        name='Cameco',
+        buy_lo=70.0,
+        buy_hi=82.0,
+        trim=122.0,
+        mech='Within 10% of High',
+        section='Climate',
+        note='[Sheet 25 Aug] buy $70–$82, trim $122.',
+    ),
+    dict(
+        t='COIN',
+        name='Coinbase',
+        buy_lo=112.0,
+        buy_hi=148.0,
+        trim=211.0,
+        mech='$211–232',
+        section='Crypto Equity',
+    ),
+    dict(t='CRSP', name='CRISPR', buy_lo=34.0, buy_hi=41.0, trim=None, section='High Risk'),
+    dict(
+        t='CRUS',
+        name='Cirrus Logic',
+        buy_lo=98.0,
+        buy_hi=126.0,
+        trim=162.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
+    dict(t='CSGP', name='CoStar', buy_lo=28.0, buy_hi=33.6, trim=None, section='High Risk'),
+    dict(
+        t='DIOD',
+        name='Diodes',
+        buy_lo=42.0,
+        buy_hi=66.0,
+        trim=113.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
+    dict(t='DOCU', name='Docusign', buy_lo=40.0, buy_hi=45.0, trim=None, section='High Risk'),
+    dict(
+        t='FCX',
+        name='Freeport-McMoRan',
+        buy_lo=34.0,
+        buy_hi=50.0,
+        trim=72.0,
+        mech='Within 10% of High',
+        section='Climate',
+        note='[Sheet 25 Aug] buy $34–$50, trim $72. [B] accum sub $50.',
+    ),
+    dict(
+        t='FLEX',
+        name='FLEX',
+        buy_lo=42.0,
+        buy_hi=70.0,
+        trim=150.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
+    dict(
+        t='FOR',
+        name='Forestar',
+        buy_lo=15.0,
+        buy_hi=20.0,
+        trim=37.0,
+        mech='Within 10% of High',
+        section='Housing',
+    ),
+    dict(
+        t='FSLR',
+        name='First Solar',
+        buy_lo=144.0,
+        buy_hi=192.0,
+        trim=305.0,
+        mech='Within 5% of High',
+        section='Climate',
+        note='[Sheet 25 Aug] buy $144–$192, trim $305.',
+    ),
+    dict(
+        t='GFS',
+        name='GlobalFoundries',
+        buy_lo=32.0,
+        buy_hi=48.0,
+        trim=83.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
+    dict(
+        t='GOOG',
+        name='Google',
+        buy_lo=240.0,
+        buy_hi=292.0,
+        trim=404.0,
+        mech='Only at ATH',
+        target='430',
+        section='Primary',
+        note='[A] support 332 — break targets 300/272/240. Sheet buy $228–$292.',
+    ),
+    dict(t='GPN', name='GPN', buy_lo=62.0, buy_hi=68.0, trim=None, section='Medium Risk'),
+    dict(t='GSK', name='GSK', section='Watch'),
+    dict(t='HPQ', name='HP', buy_lo=16.0, buy_hi=18.6, trim=28.0, mech='$28–30', section='Medium Risk'),
+    dict(
+        t='IBM',
+        name='IBM',
+        buy_lo=168.0,
+        buy_hi=208.0,
+        trim=299.0,
+        mech='Within 10% of High',
+        section='Secondary',
+    ),
+    dict(t='IIPR', name='IIPR', buy_lo=38.0, buy_hi=44.0, trim=None, section='Housing'),
+    dict(t='INMD', name='InMode', buy_lo=12.0, buy_hi=14.0, trim=None, section='Medium Risk'),
+    dict(
+        t='INTC',
+        name='Intel',
+        buy_lo=28.0,
+        buy_hi=60.0,
+        trim=135.0,
+        mech='Within 5% of High',
+        section='Secondary',
+    ),
+    dict(
+        t='JBL',
+        name='Jabil',
+        buy_lo=180.0,
+        buy_hi=238.0,
+        trim=386.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
+    dict(
+        t='JNJ',
+        name='JnJ',
+        buy_lo=154.0,
+        buy_hi=182.0,
+        trim=249.0,
+        mech='Within 10% of High',
+        section='Healthcare',
+    ),
+    dict(
+        t='KLAC',
+        name='KLAC',
+        buy_lo=90.0,
+        buy_hi=132.0,
+        trim=292.0,
+        mech='Within 5% of High',
+        section='Secondary',
+    ),
+    dict(
+        t='LMT',
+        name='Lockheed Martin',
+        buy_lo=422.0,
+        buy_hi=458.0,
+        trim=623.0,
+        mech='Within 10% of High',
+        section='Defence',
+    ),
+    dict(
+        t='LOGI',
+        name='Logitech',
+        buy_lo=66.0,
+        buy_hi=86.0,
+        trim=126.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
+    dict(
+        t='LRCX',
+        name='Lam Research',
+        buy_lo=138.0,
+        buy_hi=202.0,
+        trim=417.0,
+        mech='Within 5% of High',
+        section='Secondary',
+    ),
+    dict(
+        t='META',
+        name='META',
+        buy_lo=360.0,
+        buy_hi=548.0,
+        trim=717.0,
+        mech='Within 10% of High',
+        target='~730',
+        section='Primary',
+        note='[A] 450s → below 400 → as low as 360 (puke case 240). Sheet buy $448–$548.',
+    ),
+    dict(t='MGNI', name='Magnite', buy_lo=8.6, buy_hi=11.6, trim=20.0, mech='$20–24', section='High Risk'),
+    dict(
+        t='MRNA',
+        name='Moderna',
+        buy_lo=None,
+        buy_hi=None,
+        trim=None,
+        section='Other',
+        note="[A] 'sell the pumps' — sold 70% into the 3x pop. No levels.",
+    ),
+    dict(
+        t='MSFT',
+        name='Microsoft',
+        buy_lo=336.0,
+        buy_hi=400.0,
+        trim=500.0,
+        mech='Within 10% of High',
+        target='600',
+        section='Primary',
+        note='[A] buying opp toward 400, below = getting lucky. Sheet buy $336–$382.',
+    ),
+    dict(
+        t='MSTR',
+        name='MicroStrategy',
+        buy_lo=56.0,
+        buy_hi=90.0,
+        trim=182.0,
+        mech='$182–222',
+        section='Crypto Equity',
+        note='[Sheet 25 Aug] buy $56–$90, trim $182/$222. BTC proxy.',
+    ),
+    dict(
+        t='MU',
+        name='Micron',
+        buy_lo=132.0,
+        buy_hi=312.0,
+        trim=1192.0,
+        mech='Within 5% of High',
+        section='Secondary',
+    ),
+    dict(
+        t='NVDA',
+        name='NVIDIA',
+        buy_lo=174.0,
+        buy_hi=190.6,
+        trim=219.0,
+        mech='Author ladder',
+        target='~275',
+        section='Primary',
+        note='[A 26 Aug] buys 190.6/188/186/181/177/174, sells 219/226/231/236/248. Sheet $148–$183 / $237.',
+    ),
+    dict(
+        t='ON',
+        name='ON Semiconductor',
+        buy_lo=38.0,
+        buy_hi=62.0,
+        trim=121.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
+    dict(
+        t='OXY',
+        name='Occidental',
+        buy_lo=40.0,
+        buy_hi=46.0,
+        trim=64.0,
+        mech='$60',
+        section='Climate',
+        note='[Sheet 25 Aug] buy $40–$46, trim $64. Briefs wider $40–$74 range-trade.',
+    ),
+    dict(t='PFE', name='Pfizer', buy_lo=22.0, buy_hi=24.3, trim=None, section='Healthcare'),
+    dict(
+        t='PINS',
+        name='Pinterest',
+        buy_lo=None,
+        buy_hi=18.0,
+        trim=38.0,
+        mech='$38+',
+        section='Other',
+        note='[B] accumulate sub $18, next pump over $38.',
+    ),
+    dict(
+        t='QCOM',
+        name='Qualcomm',
+        buy_lo=122.0,
+        buy_hi=152.0,
+        trim=234.0,
+        mech='Within 10% of High',
+        section='Secondary',
+    ),
+    dict(t='RBLX', name='Roblox', buy_lo=33.0, buy_hi=41.0, trim=60.0, mech='$60–69', section='High Risk'),
+    dict(
+        t='RTX',
+        name='RTX',
+        buy_lo=116.0,
+        buy_hi=144.0,
+        trim=204.0,
+        mech='Within 10% of High',
+        section='Defence',
+    ),
+    dict(
+        t='SLB',
+        name='SLB',
+        buy_lo=37.0,
+        buy_hi=44.0,
+        trim=60.0,
+        mech='$57',
+        section='Climate',
+        note='[Sheet 25 Aug] buy $37–$44, trim $60. Briefs wider $32–$60.',
+    ),
+    dict(t='SNAP', name='Snap', section='Watch'),
+    dict(
+        t='SNPS',
+        name='Synopsys',
+        buy_lo=380.0,
+        buy_hi=400.0,
+        trim=500.0,
+        mech='$500+',
+        section='Other',
+        note='[B] range $380–$540; accumulate sub $400, trim over $500.',
+    ),
+    dict(t='SYNA', name='SYNA', buy_lo=46.0, buy_hi=70.0, trim=None, section='High Risk'),
+    dict(t='TAK', name='Takeda', buy_lo=12.0, buy_hi=13.0, trim=None, section='Medium Risk'),
+    dict(
+        t='TCEHY',
+        name='Tencent',
+        buy_lo=40.0,
+        buy_hi=55.0,
+        trim=89.0,
+        mech='Within 10% of High',
+        section='High Risk',
+    ),
+    dict(
+        t='TMO',
+        name='Thermo Fisher',
+        buy_lo=400.0,
+        buy_hi=450.0,
+        trim=None,
+        target='600+',
+        section='Other',
+        note='[B 14 Jun] accumulate $400–$450 for eventual $600+.',
+    ),
+    dict(t='TOELY', name='Tokyo Electron', section='Watch'),
+    dict(
+        t='TSLA',
+        name='Tesla',
+        buy_lo=172.0,
+        buy_hi=286.0,
+        trim=449.0,
+        mech='Within 10% of High',
+        section='Secondary',
+    ),
+    dict(
+        t='TSM',
+        name='TSMC',
+        buy_lo=315.0,
+        buy_hi=390.0,
+        trim=479.0,
+        mech='Only at ATH',
+        target='>500',
+        section='Primary',
+        note='[A] lightly adding sub 390, sweet spot ~330, support 315. Sheet buy $222–$322.',
+    ),
+    dict(t='ULH', name='ULH', buy_lo=12.6, buy_hi=14.6, trim=None, section='Medium Risk'),
+    dict(
+        t='UNH',
+        name='UnitedHealth',
+        buy_lo=234.0,
+        buy_hi=272.0,
+        trim=422.0,
+        mech='$390',
+        section='Healthcare',
+        note='[Sheet 25 Aug] buy $234–$272, trim $422. [B] trim rallies.',
+    ),
+    dict(t='V', name='Visa', section='Watch'),
+    dict(
+        t='WDC',
+        name='Western Digital',
+        buy_lo=156.0,
+        buy_hi=252.0,
+        trim=720.0,
+        mech='Within 10% of High',
+        section='Medium Risk',
+    ),
 ]
 
 # =============================================================================
@@ -420,10 +879,266 @@ GUIDE_GROUPS = [
 ]
 
 CRYPTO_REFERENCE = (
-    "**Crypto reference (static, from the sheets — not monitored):** BTC $78,817 (27 Aug sheet) • "
-    "article buy zones $68–64k / $60–58k / $56–48k • base case resolves lower unless BTC >$84k • "
-    "MSTR fair value $99, cheap ≤$90, extreme ≥$207 • MSTR target highs $250/$300 ≈ BTC $95k/$114k."
+    "See the **Crypto** tab for live prices + Walayat's published buy/trim ladder "
+    "(spot + MSTR/COIN/CRCL). Numbers are from the Cryptos sheet and the 25 Aug "
+    "portfolio CSV — nothing is simulated."
 )
+
+# =============================================================================
+# STATIC SHEET DATA (from Nadeem's AI Tech Stocks Portfolio, last updated
+# 25 Aug 2026). Used by EGF / Big Picture / Crypto / Briefs panels. These are
+# PUBLISHED figures, not computed estimates.
+# =============================================================================
+# Walayat EGF aggregate history (EGFs.csv). Percentages stored as fractions.
+EGF_HISTORY = [
+    dict(
+        date='31 Dec 2024',
+        spx=None,
+        nasdaq=19280,
+        ai_av=0.2,
+        ai_12m=0.22,
+        pe=0.75,
+        sec_av=0.18,
+        sec_12m=0.16,
+        sec_pe=0.99,
+        comments='',
+    ),
+    dict(
+        date='7 Apr 2025',
+        spx=None,
+        nasdaq=15603,
+        ai_av=0.14,
+        ai_12m=0.32,
+        pe=0.32,
+        sec_av=0.14,
+        sec_12m=0.2,
+        sec_pe=0.59,
+        comments='Positive EGFs, PE range cheap; SEC same as primary',
+    ),
+    dict(
+        date='27 Jun 2025',
+        spx=None,
+        nasdaq=20273,
+        ai_av=0.06,
+        ai_12m=0.23,
+        pe=0.76,
+        sec_av=-0.02,
+        sec_12m=0.13,
+        sec_pe=1.09,
+        comments='',
+    ),
+    dict(
+        date='31 Aug 2025',
+        spx=None,
+        nasdaq=21455,
+        ai_av=0.06,
+        ai_12m=0.2,
+        pe=0.76,
+        sec_av=0.0,
+        sec_12m=0.09,
+        sec_pe=0.93,
+        comments='Steady EGFs, moderating PE range; SEC weak EGFs, moderating PE range',
+    ),
+    dict(
+        date='5 Nov 2025',
+        spx=None,
+        nasdaq=23500,
+        ai_av=0.14,
+        ai_12m=0.2,
+        pe=0.94,
+        sec_av=0.1,
+        sec_12m=0.13,
+        sec_pe=1.45,
+        comments='Positive EGF, high PE range; Sec positive EGFs, very high PE range',
+    ),
+    dict(
+        date='9 Dec 2025',
+        spx=6840,
+        nasdaq=23576,
+        ai_av=0.17,
+        ai_12m=0.16,
+        pe=0.89,
+        sec_av=0.1,
+        sec_12m=0.13,
+        sec_pe=1.47,
+        comments='Positive EGF, moderating PE range; Sec positive EGFs, very high PE range',
+    ),
+]
+
+BIG_PICTURE_GAINS = [{'label': 'To 22 Dec 2023', 'level': 4755, 'pct': None, 'av_yr': None, 'note': 'reference level'}, {'label': 'July 2018', 'level': 2816, 'pct': 0.63, 'av_yr': 0.126, 'note': ''}, {'label': 'July 2013', 'level': 1686, 'pct': 1.72, 'av_yr': 0.172, 'note': ''}, {'label': '2003', 'level': 990, 'pct': 3.63, 'av_yr': 0.182, 'note': ''}, {'label': '2000 Top', 'level': 1550, 'pct': 1.96, 'av_yr': 0.085, 'note': 'Even the worst time to buy stocks in modern history still yields 8.5% per annum!'}, {'label': '1993', 'level': 448, 'pct': 9.24, 'av_yr': 0.308, 'note': ''}, {'label': '1987 Top', 'level': 334, 'pct': 12.74, 'av_yr': 0.354, 'note': 'All that fuss about nothing!'}, {'label': '1983', 'level': 162, 'pct': 27.32, 'av_yr': 0.683, 'note': ''}, {'label': '1973', 'level': 108, 'pct': 41.48, 'av_yr': 0.83, 'note': ''}, {'label': '1963', 'level': 69.1, 'pct': 65.4, 'av_yr': 1.09, 'note': ''}, {'label': '1953', 'level': 24.75, 'pct': 184.37, 'av_yr': 2.634, 'note': ''}, {'label': '1943', 'level': 11.85, 'pct': 386.17, 'av_yr': 4.827, 'note': ''}, {'label': '1933', 'level': 9.95, 'pct': 460.11, 'av_yr': 5.112, 'note': ''}, {'label': '1929 Top', 'level': 31.7, 'pct': 143.73, 'av_yr': 1.529, 'note': 'All your great grandpa had to do was NOT SELL and pass it down.'}]
+
+BIG_PICTURE_MANTRAS = ['Most investors act like headless chickens, buying high, selling low — because they fail to see the big picture.', "What's the message? INVEST AND FORGET!", 'Instead most investors try to weave in and out and completely miss the BIG PICTURE!', 'What matters most is not TIMING but TIME IN THE MARKET!', "You are NOT going to catch THE top or THE bottom — and for UK investors, FX can make a 'clever' exit 15% worse.", 'STOP thinking you can SELL MOST to buy back LATER — you will miss the big picture.', 'FOCUS ON THE BIG PICTURE!']
+
+# Spot + crypto-equity book from Cryptos.csv + portfolio CRYPTOs section.
+CRYPTO_ASSETS = [
+    dict(
+        t='BTC-USD',
+        name='Bitcoin',
+        kind='spot',
+        buy_lo=48000,
+        buy_hi=60000,
+        trim_start=75000,
+        trim_75=118000,
+        trim_90=130000,
+        dip_hi_ref=108000,
+        dip_lo_pct=0.18,
+        dip_hi_pct=0.23,
+        primary_tgt=134000,
+        second_tgt=144000,
+        moon=196000,
+        initial_tgt=106000,
+        next_bear=44000,
+        next_bear_lo=38000,
+        next_bear_hi=48000,
+        note='[B] Homing in on $48k target, accumulate sub $60k. [Crypto sheet] primary $134k.',
+    ),
+    dict(
+        t='ETH-USD',
+        name='Ethereum',
+        kind='spot',
+        buy_lo=2255,
+        buy_hi=2870,
+        trim_start=3400,
+        trim_75=5900,
+        trim_90=6900,
+        dip_hi_ref=4100,
+        dip_lo_pct=0.3,
+        dip_hi_pct=0.45,
+        note='[Crypto sheet] exit 3400/5900/6900; correction rebuy -30%/-45% off high.',
+    ),
+    dict(
+        t='SOL-USD',
+        name='Solana',
+        kind='spot',
+        buy_lo=163,
+        buy_hi=195,
+        trim_start=190,
+        trim_75=400,
+        trim_90=490,
+        dip_hi_ref=263,
+        dip_lo_pct=0.26,
+        dip_hi_pct=0.38,
+        note='[Crypto sheet] exit 190/400/490.',
+    ),
+    dict(
+        t='DOGE-USD',
+        name='Dogecoin',
+        kind='spot',
+        buy_lo=None,
+        buy_hi=None,
+        trim_start=0.2,
+        trim_75=0.4,
+        trim_90=0.5,
+        note='[Crypto sheet] exit 0.20/0.40/0.50.',
+    ),
+    dict(
+        t='LINK-USD',
+        name='Chainlink',
+        kind='spot',
+        buy_lo=None,
+        buy_hi=None,
+        trim_start=20,
+        trim_75=40,
+        trim_90=50,
+        note='[Crypto sheet] exit 20/40/50.',
+    ),
+    dict(
+        t='ADA-USD',
+        name='Cardano',
+        kind='spot',
+        buy_lo=None,
+        buy_hi=None,
+        trim_start=0.5,
+        trim_75=1.5,
+        trim_90=2.3,
+        note='[Crypto sheet] exit 0.5/1.5/2.3.',
+    ),
+    dict(
+        t='DOT-USD',
+        name='Polkadot',
+        kind='spot',
+        buy_lo=None,
+        buy_hi=None,
+        trim_start=7.5,
+        trim_75=23,
+        trim_90=53,
+        note='[Crypto sheet] exit 7.5/23/53.',
+    ),
+    dict(
+        t='AVAX-USD',
+        name='Avalanche',
+        kind='spot',
+        buy_lo=30,
+        buy_hi=37.26,
+        trim_start=33,
+        trim_75=75,
+        trim_90=125,
+        dip_hi_ref=54,
+        dip_lo_pct=0.31,
+        dip_hi_pct=0.45,
+        note='[Crypto sheet] exit 33/75/125.',
+    ),
+    dict(
+        t='MSTR',
+        name='MicroStrategy',
+        kind='equity',
+        buy_lo=56.0,
+        buy_hi=90.0,
+        trim=182.0,
+        trim_start=180,
+        trim_75=300,
+        trim_90=400,
+        fair_value=98,
+        cheap=89,
+        extreme=206,
+        primary_tgt=250,
+        second_tgt=300,
+        note='[Sheet] BTC proxy. Fair ~$98, cheap ≤$89, extreme ≥$206. Exit 180/300/400.',
+    ),
+    dict(
+        t='COIN',
+        name='Coinbase',
+        kind='equity',
+        buy_lo=112.0,
+        buy_hi=148.0,
+        trim=211.0,
+        trim_start=252,
+        trim_75=350,
+        trim_90=400,
+        note='[Sheet] buy $112–$148, trim $211–$232. [Crypto] exit 252/350/400.',
+    ),
+    dict(
+        t='CRCL',
+        name='Circle',
+        kind='equity',
+        buy_lo=50.0,
+        buy_hi=66.0,
+        trim=124.0,
+        note='[Sheet] buy $50–$66, trim $124–$138. Stablecoin gamble.',
+    ),
+    dict(
+        t='BMNR',
+        name='Bitmine (ETH proxy)',
+        kind='equity',
+        buy_lo=12.0,
+        buy_hi=15.0,
+        trim=28.0,
+        note='[Sheet] Bitmine-Eth buy $12–$15, trim $28–$38. Verify Yahoo ticker.',
+    ),
+]
+
+STOCK_BRIEFS = {'NVDA': ('Very Strong', 'Dip Buy', 'Very Strong Earnings growth is making the stock cheaper over TIME — Strong earnings failing to pump Nvidia suggests dip is probable, aim to accumulate sub $190.', '3-Jul'), 'GOOG': ('Strong', 'Light Trims', "Very good trend and not expensive, don't trim too much too early! But it is near an extreme so bubble valuation area so trend pause until good earnings play catch up.", '26-May'), 'AMD': ('Narrow', 'Buy Deep Dip', 'Very Strong earnings growth but right now very expensive! Seek sub $240 for risk vs reward.', '26-May'), 'MSFT': ('Strong', 'Accumulate', 'Very cheap, traded below 2022 PE low on the recent dip to $350, should accumulate and not trim sub $500.', '3-Jul'), 'META': ('Strong', 'Buy Deep Dip', "It had strong earnings growth but now weak, don't buy too high i.e. destined to new bear market lows below 520.", '3-Jul'), 'TSM': ('Strong', 'Dip Buy', "Mistake to sell all should have held a core position no matter what! It is expensive right now, it's going to take a panic event to get TSMC cheap!", '3-Jul'), 'QCOM': ('Weak', 'SELL', 'Weak earnings, volatile FOMO trend to $250+ to sell into, scaling out every 10 bucks it pumps, with a view to buying back sub $150 down to $120.', '29-May'), 'ASML': ('Very Strong', 'Dip Buy', 'Not too expensive, wait for a dip to buy starting at 1272, whilst trimming into new highs.', '3-Jul'), 'AVGO': ('Strong', 'Dip Buy', 'Consistently very strong earnings growth, do not sell out! Wait for a dip to buy and buy BIG at around $320.', '3-Jul'), 'LRCX': ('Strong', 'Buy Deep Dip', 'Very expensive even with good earnings growth a 30% to 50% drop is doable to under $200.', '26-May'), 'IBM': ('Weak', 'Accumulate', 'Stock has fallen with improving earnings which makes it very cheap i.e. $226 is like buying at $165 a year ago! It could range down to $160 once more.', '14-May'), 'KLAC': ('Strong', 'Dip Buy', 'Good growth but expensive right now! 30% drop is doable.', '14-May'), 'AMAT': ('Strong', 'Buy Deep Dip', 'Growing earnings but very expensive i.e. PE has doubled, selling sub $250 to accumulate.', '14-May'), 'AMZN': ('Strong', 'Light Trims', "Strong earnings growth, supportive of new high bull run — don't over trim; seek $200 to accumulate.", '14-May'), 'TSLA': ('Narrow', 'Buy Deep Dip', "Stock is falling but PE is going up — Don't buy too much too high! Stay short! It's a gamble!", '14-May'), 'MU': ('Narrow', 'Leave for later', 'In an earnings bubble that will eventually crack when the orders disappear.', '14-May'), 'AAPL': ('Strong', 'Dip Buy', 'Steady earnings growth due to buybacks, so buy if cheap for long-run return.', '14-May'), 'INTC': ('Weak', 'SELL', "Erratic earnings, scale out with sell limits $129, $139, $149 to sell what's left.", '13-May'), 'LMT': ('Strong', 'Range Trade', 'Earnings does not grow much so stock tends to run away from itself on war fomo. Buy on a deep dip to trim into fomo, its a dividend stock.', '7-May'), 'RTX': ('Strong', 'Dip Buy', 'Strong earnings growth, RTX is the defence stock to accumulate for the long-run, tends to run away from the buying ranges so add when it dips.', '16-Jun'), 'FCX': ('', 'Dip Buy', 'Strong earnings growth, consistent earnings beats, fair value in terms of PE range, accum sub $50.', '14-Jun'), 'OXY': ('', 'Range Trade', 'Earnings are taking off on the back of high oil price, EGFs imply its going to pump higher, the range is $74 to $40 so accumulate towards bottom and distribute towards top.', '16-Jun'), 'SLB': ('', 'Range Trade', 'In a $60 to $32 range as it awaits earnings growth.', '16-Jun'), 'FSLR': ('', 'Accumulate', 'Cheap, growing earnings accumulate, a dip is getting lucky to add more sub $200, will make new all time highs to trim into.', '9-May'), 'CCJ': ('', 'Buy Deep Dip', 'Earnings lifting but high PE, it may be coming to end of its bull run.', '7-May'), 'TMO': ('', 'Accumulate', 'Stable earnings, accum between $450 and $400 for eventual $600+.', '14-Jun'), 'SNPS': ('', 'Dip Buy', 'Stable earnings, crashed software, in a $540 to $380 range, accumulate sub $400, trim over $500.', '28-May'), 'PINS': ('', 'Dip Buy', 'High risk gamble stock, crashed from $90 high, accumulate sub $18 for next pump over $38.', '19-May'), 'BKNG': ('', 'Dip Buy', 'Okay earnings, taking a hit from war travel disruption, accumulate for the long-run as the price drops, and trim the pumps.', '19-May'), 'UNH': ('', 'Trim Rallies', 'Weak earnings, trim the rallies until earnings start to improve, $380 is like $480.', '9-May'), 'COIN': ('', 'Dip Buy', "Lacks earnings growth, it's a play on bitcoin trend, so swing trade it, accum sub $150.", '1-Jul'), 'MSTR': ('', 'Buy Deep Dip', 'Leveraged to bitcoin, accumulate for next cycle, sub $90 but volatile could go as low as $50, and there is the risk of an epic collapse to zero.', '1-Jul'), 'CRCL': ('', 'Dip Buy', 'Loss maker stablecoin gamble, accumulate sub $100 for eventual $300+.', '1-Jul'), 'BABA': ('', 'Buy Deep Dip', 'Was good but now going bad for some reason.', '7-May'), 'TCEHY': ('', 'Accumulate', '$60 equates to $50 a year ago, buy the dip.', '9-May')}
+
+# Benchmark tickers for Market Overview (real Yahoo symbols only).
+MARKET_BENCH = ["^GSPC", "^IXIC", "^DJI", "^VIX", "GC=F", "CL=F", "DX-Y.NYB"]
+MARKET_BENCH_NAMES = {
+    "^GSPC": "S&P 500", "^IXIC": "Nasdaq", "^DJI": "Dow", "^VIX": "VIX",
+    "GC=F": "Gold", "CL=F": "WTI Crude", "DX-Y.NYB": "US Dollar Index",
+}
+
+# Crypto Yahoo symbols we actually fetch (equities already in ALL_TICKERS).
+CRYPTO_SPOT_TICKERS = [c["t"] for c in CRYPTO_ASSETS if c.get("kind") == "spot"]
+CRYPTO_EQUITY_TICKERS = [c["t"] for c in CRYPTO_ASSETS if c.get("kind") == "equity"]
 
 # =============================================================================
 # DERIVED TICKER TABLES (built once at import)
@@ -445,6 +1160,9 @@ DELISTED: dict[str, str] = {
 PORTFOLIO: list[dict] = [s for s in STOCKS if s["t"] not in DELISTED]
 MONITORED: list[dict] = [s for s in BRIGADE if not s.get("static")] + PORTFOLIO
 ALL_TICKERS: list[str] = list(dict.fromkeys(s["t"] for s in MONITORED))  # de-dup, ordered
+
+# Earnings / overview fetch set = equity book only (no crypto-USD pairs here).
+EQUITY_TICKERS: list[str] = list(ALL_TICKERS)
 
 # Levels as floats in one place, so the hot path never calls .get()/float().
 LEVELS: dict[str, tuple[float, float, float]] = {
@@ -474,8 +1192,8 @@ def validate_levels(levels: dict[str, tuple[float, float, float]] = LEVELS) -> l
         if not math.isnan(trim) and not math.isnan(hi) and trim <= hi:
             problems.append(
                 f"{t}: trim ({trim:g}) <= buy_hi ({hi:g}) — TRIM always shadows BUY")
-        if math.isnan(hi) and math.isnan(trim):
-            problems.append(f"{t}: no buy_hi and no trim — can only ever show WAIT")
+        # v3: names without buy_hi/trim are intentional watch-only — user fills
+        # them as found. Do NOT flag them (no top-of-page warning).
     return problems
 
 
@@ -682,6 +1400,181 @@ def _download_fundamentals(tickers: Optional[Sequence[str]] = None) -> tuple[dic
             else:
                 errs[t] = "empty response (rate limited or delisted)"
     return out, errs
+
+
+def _download_benchmarks() -> dict:
+    """Index / macro snapshots for Market Overview. Real Yahoo symbols only."""
+    data = with_retry(lambda: yf.download(
+        tickers=MARKET_BENCH, period="10d", interval="1d",
+        group_by="ticker", auto_adjust=False, progress=False, threads=True),
+        label="benchmarks")
+    out: dict[str, dict] = {}
+    for t in MARKET_BENCH:
+        closes = _series(data, t, "Close")
+        if closes is None or closes.empty:
+            continue
+        price = float(closes.iloc[-1])
+        prev = float(closes.iloc[-2]) if len(closes) > 1 else None
+        week_ago = float(closes.iloc[-6]) if len(closes) >= 6 else (
+            float(closes.iloc[0]) if len(closes) else None)
+        out[t] = {
+            "price": price,
+            "prev": prev,
+            "week_ago": week_ago,
+            "day_pct": ((price / prev - 1.0) if prev else None),
+            "week_pct": ((price / week_ago - 1.0) if week_ago else None),
+        }
+    return out
+
+
+def _download_crypto_quotes() -> dict:
+    """Spot crypto + any crypto-equity tickers not already in the main book
+    (e.g. BMNR). MSTR/COIN/CRCL come from the main quote feed."""
+    extra_eq = [t for t in CRYPTO_EQUITY_TICKERS if t not in set(ALL_TICKERS)]
+    tickers = list(dict.fromkeys(CRYPTO_SPOT_TICKERS + extra_eq))
+    if not tickers:
+        return {}
+    data = with_retry(lambda: yf.download(
+        tickers=tickers, period="10d", interval="1d",
+        group_by="ticker", auto_adjust=False, progress=False, threads=True),
+        label="crypto")
+    out: dict[str, dict] = {}
+    for t in tickers:
+        closes = _series(data, t, "Close")
+        highs = _series(data, t, "High")
+        if closes is None or closes.empty:
+            continue
+        price = float(closes.iloc[-1])
+        prev = float(closes.iloc[-2]) if len(closes) > 1 else None
+        week_ago = float(closes.iloc[-6]) if len(closes) >= 6 else (
+            float(closes.iloc[0]) if len(closes) else None)
+        ath_window = float(highs.max()) if highs is not None and not highs.empty else None
+        out[t] = {
+            "price": price,
+            "prev": prev,
+            "week_ago": week_ago,
+            "day_pct": ((price / prev - 1.0) if prev else None),
+            "week_pct": ((price / week_ago - 1.0) if week_ago else None),
+            "window_high": ath_window,
+        }
+    return out
+
+
+def _download_earnings_one(t: str) -> tuple[str, dict]:
+    """Next earnings date + last reported surprise from Yahoo. No invented dates."""
+    try:
+        def load():
+            tk = yf.Ticker(t)
+            cal = {}
+            try:
+                cal = tk.calendar or {}
+            except Exception:
+                cal = {}
+            next_dt = None
+            # calendar may be dict with 'Earnings Date' list, or DataFrame
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date") or cal.get("earningsDate")
+                if isinstance(ed, (list, tuple)) and ed:
+                    next_dt = ed[0]
+                elif ed is not None and not isinstance(ed, (list, tuple)):
+                    next_dt = ed
+            elif cal is not None and hasattr(cal, "empty") and not cal.empty:
+                # DataFrame form
+                if "Earnings Date" in cal.index:
+                    val = cal.loc["Earnings Date"].iloc[0]
+                    next_dt = val
+            # last reported from earnings_dates
+            last_reported = None
+            last_surprise = None
+            last_eps = None
+            est_eps = None
+            try:
+                edf = tk.get_earnings_dates(limit=8)
+            except Exception:
+                edf = None
+            if edf is not None and not edf.empty:
+                # rows with Reported EPS
+                for idx, row in edf.iterrows():
+                    rep = row.get("Reported EPS") if hasattr(row, "get") else row["Reported EPS"] if "Reported EPS" in edf.columns else None
+                    try:
+                        import math
+                        rep_f = float(rep) if rep is not None and rep == rep else None
+                    except Exception:
+                        rep_f = None
+                    if rep_f is not None:
+                        last_reported = idx
+                        last_eps = rep_f
+                        sur = row["Surprise(%)"] if "Surprise(%)" in edf.columns else None
+                        try:
+                            last_surprise = float(sur) if sur is not None and sur == sur else None
+                        except Exception:
+                            last_surprise = None
+                        break
+                # upcoming estimate = first row with no reported
+                for idx, row in edf.iterrows():
+                    rep = row["Reported EPS"] if "Reported EPS" in edf.columns else None
+                    try:
+                        rep_f = float(rep) if rep is not None and rep == rep else None
+                    except Exception:
+                        rep_f = None
+                    if rep_f is None:
+                        next_dt = next_dt or idx
+                        est = row["EPS Estimate"] if "EPS Estimate" in edf.columns else None
+                        try:
+                            est_eps = float(est) if est is not None and est == est else None
+                        except Exception:
+                            est_eps = None
+                        break
+            def _iso(x):
+                if x is None:
+                    return None
+                try:
+                    ts = pd.Timestamp(x)
+                    return ts.isoformat()
+                except Exception:
+                    return str(x)
+            return {
+                "next": _iso(next_dt),
+                "last": _iso(last_reported),
+                "last_eps": last_eps,
+                "last_surprise_pct": last_surprise,  # already in percent units from Yahoo
+                "est_eps": est_eps,
+            }
+        return t, with_retry(load, attempts=2, label=f"earn:{t}")
+    except Exception as exc:
+        return t, {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _download_earnings(tickers: Sequence[str]) -> dict:
+    out: dict[str, dict] = {}
+    if not tickers or not YF_OK:
+        return out
+    with ThreadPoolExecutor(max_workers=min(FUND_MAX_WORKERS, len(tickers))) as pool:
+        for t, info in pool.map(_download_earnings_one, tickers):
+            out[t] = info or {}
+    return out
+
+
+def _download_week_returns(tickers: Sequence[str]) -> dict:
+    """Trailing ~5-session return per equity ticker from daily bars."""
+    if not tickers:
+        return {}
+    data = with_retry(lambda: yf.download(
+        tickers=list(tickers), period="10d", interval="1d",
+        group_by="ticker", auto_adjust=False, progress=False, threads=True),
+        label="week_returns")
+    out: dict[str, dict] = {}
+    for t in tickers:
+        closes = _series(data, t, "Close")
+        if closes is None or len(closes) < 2:
+            continue
+        price = float(closes.iloc[-1])
+        # ~5 trading sessions back (or earliest available)
+        ref_idx = -6 if len(closes) >= 6 else 0
+        ref = float(closes.iloc[ref_idx])
+        if ref:
+            out[t] = {"price": price, "ref": ref, "week_pct": price / ref - 1.0}
+    return out
 
 
 # =============================================================================
@@ -1112,6 +2005,59 @@ class DataStore:
         stt.errors.update(bundle.get("errors", {}))
         return bundle.get("info", {}), bundle.get("metrics", {})
 
+    # -- market overview / crypto / earnings --------------------------------
+    def _fetch_overview(self, day_key: str) -> Optional[dict]:
+        stt = self._state("overview")
+        try:
+            t0 = time.perf_counter()
+            benches = _download_benchmarks()
+            # earnings only for the equity book (skip if huge — still OK at ~80)
+            earns = _download_earnings(EQUITY_TICKERS)
+            week = _download_week_returns(EQUITY_TICKERS)
+            bundle = {"benchmarks": benches, "earnings": earns, "week": week}
+            self.cache.put(f"overview-{day_key}", bundle)
+            stt.seconds = round(time.perf_counter() - t0, 2)
+            stt.fetched, stt.stale, stt.n = True, False, len(earns)
+            return bundle
+        except Exception as exc:
+            stt.errors["_fetch"] = f"{type(exc).__name__}: {exc}"
+            return None
+
+    def _fetch_crypto(self) -> Optional[dict]:
+        stt = self._state("crypto")
+        try:
+            t0 = time.perf_counter()
+            spot = _download_crypto_quotes()
+            self.cache.put("crypto-spot", spot)
+            stt.seconds = round(time.perf_counter() - t0, 2)
+            stt.fetched, stt.stale, stt.n = True, False, len(spot)
+            return spot
+        except Exception as exc:
+            stt.errors["_fetch"] = f"{type(exc).__name__}: {exc}"
+            return None
+
+    def overview(self, day_key: str, wait: bool = True) -> dict:
+        stt, key = self._state("overview"), f"overview-{day_key}"
+        bundle = self.cache.get(key, max_age_s=OVERVIEW_TTL_S)
+        if bundle is None and not self.offline:
+            bundle = self._run(key, lambda: self._fetch_overview(day_key), wait=wait)
+        if bundle is None:
+            bundle = self.cache.get(key, max_age_s=None)
+            if bundle is not None:
+                stt.stale, stt.note = True, "serving last cached overview"
+        return bundle or {}
+
+    def crypto_spot(self, wait: bool = True) -> dict:
+        stt = self._state("crypto")
+        spot = self.cache.get("crypto-spot", max_age_s=CRYPTO_TTL_S)
+        if spot is None and not self.offline:
+            spot = self._run("crypto-spot", self._fetch_crypto, wait=wait)
+        if spot is None:
+            spot = self.cache.get("crypto-spot", max_age_s=None)
+            if spot is not None:
+                stt.stale, stt.note = True, "serving last cached crypto"
+        return spot or {}
+
     # -- background warming ------------------------------------------------
     def prefetch(self, slot_key: str, day_key: str) -> None:
         """Start a refresh for anything stale. Never blocks, never duplicates:
@@ -1124,6 +2070,10 @@ class DataStore:
             self._start(f"funds-{day_key}", lambda: self._fetch_funds(day_key))
         if (self.cache.age_s("ath-state") or float("inf")) > ATH_TTL_S:
             self._start("ath-state", self._fetch_aths)
+        if self.cache.get(f"overview-{day_key}", OVERVIEW_TTL_S) is None:
+            self._start(f"overview-{day_key}", lambda: self._fetch_overview(day_key))
+        if self.cache.get("crypto-spot", CRYPTO_TTL_S) is None:
+            self._start("crypto-spot", self._fetch_crypto)
 
     def pending(self) -> list[str]:
         names = {"ath-state": "ath"}
@@ -1137,7 +2087,7 @@ class DataStore:
     def status_line(self) -> str:
         bits = []
         inflight = set(self.pending())
-        for name in ("quotes", "ath", "fundamentals"):
+        for name in ("quotes", "ath", "fundamentals", "overview", "crypto"):
             s = self.states.get(name)
             if not s:
                 continue
@@ -1630,6 +2580,535 @@ def render_fundamentals_tab(stocks_list, quotes, zones, funds, metrics_by_ticker
         "Fundamentals refresh once per day.")
 
 
+def _how_to_box(title: str, bullets: list[str]) -> None:
+    """Standard 'how to use this tab' callout on every analysis tab."""
+    items = "".join(f"<li style='margin:4px 0;'>{_e(b)}</li>" for b in bullets)
+    st.markdown(
+        f"<div style='border:1px solid #37474F; border-radius:10px; padding:12px 16px; "
+        f"background:rgba(144,202,249,0.06); margin-bottom:14px;'>"
+        f"<div style='color:#90CAF9;font-weight:700;margin-bottom:6px;'>{_e(title)}</div>"
+        f"<ul style='margin:0; padding-left:18px; color:#B0BEC5; font-size:14px;'>{items}</ul>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_market_overview_tab(overview: dict, quotes: dict, zones: dict,
+                               metrics_by_ticker: dict, near_pct: float) -> None:
+    """Upcoming earnings, week lookback, macro sentiment, actionable cross-read."""
+    st.subheader("🌐 Market Overview")
+    _how_to_box("How to use this tab", [
+        "Check Upcoming Earnings BEFORE the open of an earnings week — do not add size into a print you cannot price.",
+        "Use Week Lookback to see which names already moved: a stock that dumped into its buy range is a candidate; one that ripped into trim is a candidate to scale out.",
+        "Read macro gauges (VIX, DXY, crude, gold) as CONTEXT, not triggers — Walayat times individual stocks off valuations, not the S&P.",
+        "Cross-read zone strip + briefs: BUY + strong EGF + quiet macro > BUY into a VIX spike only if you still have powder dry.",
+        "Every figure here is from Yahoo Finance or Walayat's published sheet. Missing = em-dash, never filled in.",
+    ])
+
+    benches = (overview or {}).get("benchmarks") or {}
+    earns = (overview or {}).get("earnings") or {}
+    week = (overview or {}).get("week") or {}
+
+    # ── Macro strip ────────────────────────────────────────────────────────
+    st.markdown("##### Macro snapshot (Yahoo)")
+    cols = st.columns(len(MARKET_BENCH))
+    for i, t in enumerate(MARKET_BENCH):
+        b = benches.get(t) or {}
+        name = MARKET_BENCH_NAMES.get(t, t)
+        px = b.get("price")
+        d = b.get("day_pct")
+        w = b.get("week_pct")
+        with cols[i]:
+            st.markdown(
+                f"<div style='border:1px solid #263238;border-radius:8px;padding:8px 10px;'>"
+                f"<div class='c-mut' style='font-size:12px;'>{_e(name)}</div>"
+                f"<div style='font-size:18px;font-weight:700;color:#E8EDF4;'>"
+                f"{_e(fmt_money(px) if t not in ('^VIX',) else (fmt_n(px, 2) if px is not None else DASH))}"
+                f"</div>"
+                f"<div style='font-size:12px;'>"
+                f"<span class='{'c-ok' if (d or 0) > 0 else ('c-bad' if (d or 0) < 0 else 'c-mut')}'>"
+                f"D {_e(fmt_g(d) if d is not None else DASH)}</span>"
+                f"&nbsp;·&nbsp;"
+                f"<span class='{'c-ok' if (w or 0) > 0 else ('c-bad' if (w or 0) < 0 else 'c-mut')}'>"
+                f"W {_e(fmt_g(w) if w is not None else DASH)}</span>"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
+
+    # Sentiment one-liner from VIX level (descriptive, not predictive)
+    vix = (benches.get("^VIX") or {}).get("price")
+    if vix is not None:
+        if vix >= 30:
+            mood = f"VIX at {vix:.1f} — fear regime. Historically when Walayat has powder dry this is ACCUMULATE territory, not a reason to freeze."
+        elif vix >= 20:
+            mood = f"VIX at {vix:.1f} — elevated. Favour limit orders inside published buy ranges; avoid chase."
+        elif vix >= 14:
+            mood = f"VIX at {vix:.1f} — normal. Stick to the plan: valuations first, mechanics second."
+        else:
+            mood = f"VIX at {vix:.1f} — complacent. Trim-into-strength discipline matters more than usual."
+        st.info(mood)
+
+    st.markdown("---")
+
+    # ── Upcoming earnings (next 30 days) ───────────────────────────────────
+    st.markdown("##### Upcoming earnings & recent prints (portfolio names)")
+    st.caption("Source: Yahoo Finance earnings calendar / earnings dates. Dates the feed does not carry render as —.")
+    now = pd.Timestamp.now(tz=MARKET_TZ)
+    upcoming = []
+    recent = []
+    for t, info in earns.items():
+        if not info or info.get("error"):
+            continue
+        nxt = info.get("next")
+        last = info.get("last")
+        name = (BY_TICKER.get(t) or {}).get("name", t)
+        if nxt:
+            try:
+                ts = pd.Timestamp(nxt)
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize(MARKET_TZ)
+                else:
+                    ts = ts.tz_convert(MARKET_TZ)
+                days = (ts.normalize() - now.normalize()).days
+                if -1 <= days <= 45:
+                    upcoming.append((ts, days, t, name, info))
+            except Exception:
+                pass
+        if last:
+            try:
+                ts = pd.Timestamp(last)
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize(MARKET_TZ)
+                else:
+                    ts = ts.tz_convert(MARKET_TZ)
+                days = (now.normalize() - ts.normalize()).days
+                if 0 <= days <= 14:
+                    recent.append((ts, days, t, name, info))
+            except Exception:
+                pass
+    upcoming.sort()
+    recent.sort(reverse=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Next 45 days**")
+        if not upcoming:
+            st.caption("No upcoming earnings dates returned by Yahoo for the book right now.")
+        else:
+            rows = []
+            for ts, days, t, name, info in upcoming:
+                zone = zones.get(t, ZONE_WAIT)
+                cls = ZONE_CLASSES.get(zone, "z-wait")
+                est = info.get("est_eps")
+                rows.append(
+                    "<tr>"
+                    + _cell(_e(t), "tk")
+                    + _cell(_e(name), f"nm {cls}")
+                    + _cell(_e(ts.strftime('%a %d %b %Y')))
+                    + _cell(_e(f"in {days}d" if days >= 0 else "today"))
+                    + _cell(_e(fmt_n(est, 2) if est is not None else DASH))
+                    + _cell(_e(zone), cls)
+                    + "</tr>"
+                )
+            heads = ["Ticker", "Company", "Earnings", "When", "EPS est.", "Zone"]
+            th = "".join(f"<th>{_e(h)}</th>" for h in heads)
+            st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                        + "".join(rows) + "</table>", unsafe_allow_html=True)
+    with c2:
+        st.markdown("**Reported in the last 14 days**")
+        if not recent:
+            st.caption("No recent prints in the Yahoo feed for the book.")
+        else:
+            rows = []
+            for ts, days, t, name, info in recent:
+                sur = info.get("last_surprise_pct")  # Yahoo already in %
+                eps = info.get("last_eps")
+                sur_html = DASH
+                if sur is not None:
+                    col = "c-ok" if sur > 0 else ("c-bad" if sur < 0 else "c-mut")
+                    sur_html = f"<span class='{col}'>{sur:+.1f}%</span>"
+                rows.append(
+                    "<tr>"
+                    + _cell(_e(t), "tk")
+                    + _cell(_e(name), "nm")
+                    + _cell(_e(ts.strftime('%d %b')))
+                    + _cell(_e(fmt_n(eps, 2) if eps is not None else DASH))
+                    + _cell(sur_html)
+                    + "</tr>"
+                )
+            heads = ["Ticker", "Company", "Reported", "EPS", "Surprise"]
+            th = "".join(f"<th>{_e(h)}</th>" for h in heads)
+            st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                        + "".join(rows) + "</table>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    # ── Week lookback ──────────────────────────────────────────────────────
+    st.markdown("##### Previous week — portfolio movers")
+    st.caption("~5 trading sessions, daily close-to-close from Yahoo. Sorted by move.")
+    movers = []
+    for t, w in week.items():
+        pct = w.get("week_pct")
+        if pct is None:
+            continue
+        s = BY_TICKER.get(t) or {"t": t, "name": t}
+        movers.append((pct, t, s.get("name", t), w.get("price"), zones.get(t, ZONE_WAIT)))
+    movers.sort()  # losers first
+    if not movers:
+        st.caption("Week-return data not yet available (cache warming).")
+    else:
+        losers = movers[:12]
+        winners = list(reversed(movers[-12:]))
+        lc, rc = st.columns(2)
+        def _mv_table(title, items, col):
+            with col:
+                st.markdown(f"**{title}**")
+                rows = []
+                for pct, t, name, px, zone in items:
+                    cls = ZONE_CLASSES.get(zone, "z-wait")
+                    colc = "c-ok" if pct > 0 else "c-bad"
+                    brief = (STOCK_BRIEFS.get(t) or (None, None, "", None))[2]
+                    brief_s = (brief[:90] + "…") if brief and len(brief) > 90 else (brief or "")
+                    rows.append(
+                        "<tr>"
+                        + _cell(_e(t), "tk")
+                        + _cell(_e(name), f"nm {cls}")
+                        + _cell(fmt_money(px))
+                        + _cell(f"<span class='{colc}'>{pct*100:+.1f}%</span>")
+                        + _cell(_e(zone), cls)
+                        + _cell(_e(brief_s), "c-mut")
+                        + "</tr>"
+                    )
+                heads = ["Ticker", "Company", "Price", "Week", "Zone", "Brief (sheet)"]
+                th = "".join(f"<th>{_e(h)}</th>" for h in heads)
+                st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                            + "".join(rows) + "</table>", unsafe_allow_html=True)
+        _mv_table("Largest declines", losers, lc)
+        _mv_table("Largest advances", winners, rc)
+
+    st.markdown("---")
+    # ── Zone × brief cross-read ────────────────────────────────────────────
+    st.markdown("##### Actionable cross-read (zone × Walayat brief)")
+    st.caption("Only names that are currently BUY / NEAR / TRIM and have a published brief.")
+    rows = []
+    for t, zone in sorted(zones.items(), key=lambda kv: (0 if kv[1]==ZONE_BUY else 1 if kv[1]==ZONE_NEAR else 2 if kv[1]==ZONE_TRIM else 9, kv[0])):
+        if zone not in (ZONE_BUY, ZONE_NEAR, ZONE_TRIM):
+            continue
+        brief = STOCK_BRIEFS.get(t)
+        if not brief:
+            continue
+        moat, action, text, upd = brief
+        s = BY_TICKER.get(t) or {"t": t, "name": t}
+        q = (quotes or {}).get(t)
+        price = q[0] if q else None
+        cls = ZONE_CLASSES.get(zone, "z-wait")
+        rows.append(
+            "<tr>"
+            + _cell(_e(t), "tk")
+            + _cell(_e(s.get("name", t)), f"nm {cls}")
+            + _cell(fmt_money(price))
+            + _cell(_e(zone), f"st {cls}")
+            + _cell(_e(action or DASH))
+            + _cell(_e(moat or DASH))
+            + _cell(_e(text))
+            + _cell(_e(upd or ""))
+            + "</tr>"
+        )
+    if not rows:
+        st.caption("No actionable names with a published brief right now.")
+    else:
+        heads = ["Ticker", "Company", "Price", "Zone", "Action", "Moat", "Brief", "As of"]
+        th = "".join(f"<th>{_e(h)}</th>" for h in heads)
+        st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                    + "".join(rows) + "</table>", unsafe_allow_html=True)
+
+
+def render_crypto_tab(crypto_spot: dict, quotes: dict, zones: dict) -> None:
+    st.subheader("🪙 Crypto")
+    _how_to_box("How to use this tab", [
+        "Treat crypto as a SEPARATE accumulate/distribute book — Walayat's rule: the higher you buy, the more likely you hold the bag when it turns.",
+        "Spot ladder: start trimming at the published 'Start' level, be 75% out by mid, 90% out by the top. Rebuy only on the trailing correction bands (e.g. BTC −18% to −23% off the last high).",
+        "MSTR is a leveraged BTC proxy — use the fair/cheap/extreme bands; do not average into 'Deep Shit Expensive'.",
+        "COIN / CRCL swing with BTC; buy inside the sheet ranges, do not chase.",
+        "Next-bear BTC target on the sheet is $44k (range $38–48k). That is a PLANNING number, not a live forecast.",
+        "All targets and bands below are copied from the Cryptos sheet / 25 Aug portfolio CSV. Live prices are Yahoo. Nothing is simulated.",
+    ])
+
+    # Live spot table
+    st.markdown("##### Live spot + published ladder")
+    rows = []
+    for c in sorted(CRYPTO_ASSETS, key=lambda x: x["name"].lower()):
+        t = c["t"]
+        if c.get("kind") == "spot":
+            q = (crypto_spot or {}).get(t) or {}
+            price = q.get("price"); day = q.get("day_pct"); week = q.get("week_pct")
+        else:
+            qq = (quotes or {}).get(t)
+            if qq:
+                price = qq[0]
+                day = (qq[0] / qq[1] - 1.0) if qq[1] else None
+                week = None
+            else:
+                q = (crypto_spot or {}).get(t) or {}
+                price = q.get("price"); day = q.get("day_pct"); week = q.get("week_pct")
+        buy = DASH
+        if c.get("buy_hi") is not None:
+            lo, hi = c.get("buy_lo"), c.get("buy_hi")
+            buy = f"{fmt_money(lo)} – {fmt_money(hi)}" if lo is not None else f"≤ {fmt_money(hi)}"
+        trim = DASH
+        if c.get("trim_start") is not None:
+            trim = (f"{fmt_money(c['trim_start'])} → {fmt_money(c.get('trim_75'))} → "
+                    f"{fmt_money(c.get('trim_90'))}")
+        elif c.get("trim") is not None:
+            trim = fmt_money(c["trim"])
+        # zone-like signal vs buy/trim if we have price
+        signal = DASH
+        if price is not None and c.get("buy_hi") is not None:
+            if price <= float(c["buy_hi"]):
+                signal = "🟢 BUY BAND"
+            elif c.get("trim_start") is not None and price >= float(c["trim_start"]):
+                signal = "🔴 TRIM BAND"
+            elif c.get("trim") is not None and price >= float(c["trim"]):
+                signal = "🔴 TRIM BAND"
+            else:
+                signal = "wait"
+        rows.append(
+            "<tr>"
+            + _cell(_e(t), "tk")
+            + _cell(_e(c["name"]), "nm")
+            + _cell(_e(c.get("kind", "")))
+            + _cell(fmt_money(price) if price is not None else DASH)
+            + _cell(fmt_g(day) if day is not None else DASH)
+            + _cell(fmt_g(week) if week is not None else DASH)
+            + _cell(_e(buy))
+            + _cell(_e(str(trim)))
+            + _cell(_e(signal))
+            + "</tr>"
+        )
+    heads = ["Ticker", "Name", "Kind", "Price", "Day", "Week", "Buy band", "Trim ladder", "Signal"]
+    th = "".join(f"<th>{_e(h)}</th>" for h in heads)
+    st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                + "".join(rows) + "</table>", unsafe_allow_html=True)
+
+    # BTC gift / targets
+    btc = next((c for c in CRYPTO_ASSETS if c["t"] == "BTC-USD"), None)
+    mstr = next((c for c in CRYPTO_ASSETS if c["t"] == "MSTR"), None)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("##### Bitcoin — published targets (sheet)")
+        if btc:
+            items = [
+                ("Initial target", btc.get("initial_tgt")),
+                ("Primary target", btc.get("primary_tgt")),
+                ("Second target", btc.get("second_tgt")),
+                ("Moon shot", btc.get("moon")),
+                ("Next bear target", btc.get("next_bear")),
+                ("Next bear range", f"{fmt_money(btc.get('next_bear_lo'))} – {fmt_money(btc.get('next_bear_hi'))}"
+                 if btc.get("next_bear_lo") else None),
+                ("Dip-buy off last high", f"−{btc.get('dip_lo_pct', 0)*100:.0f}% to −{btc.get('dip_hi_pct', 0)*100:.0f}%"
+                 f" off {fmt_money(btc.get('dip_hi_ref'))}" if btc.get("dip_hi_ref") else None),
+            ]
+            for k, v in items:
+                if v is None:
+                    continue
+                vv = fmt_money(v) if isinstance(v, (int, float)) else v
+                st.markdown(f"- **{k}:** {vv}")
+            st.caption(btc.get("note") or "")
+    with c2:
+        st.markdown("##### MSTR — valuation bands (sheet)")
+        if mstr:
+            items = [
+                ("Fair value", mstr.get("fair_value")),
+                ("Cheap ≤", mstr.get("cheap")),
+                ("Max extreme ≥", mstr.get("extreme")),
+                ("Primary target high", mstr.get("primary_tgt")),
+                ("Secondary target high", mstr.get("second_tgt")),
+                ("Buy band", f"{fmt_money(mstr.get('buy_lo'))} – {fmt_money(mstr.get('buy_hi'))}"),
+                ("Trim ladder", f"{fmt_money(mstr.get('trim_start'))} → "
+                               f"{fmt_money(mstr.get('trim_75'))} → {fmt_money(mstr.get('trim_90'))}"),
+            ]
+            for k, v in items:
+                if v is None:
+                    continue
+                vv = fmt_money(v) if isinstance(v, (int, float)) else v
+                st.markdown(f"- **{k}:** {vv}")
+            st.caption(mstr.get("note") or "")
+
+    st.markdown("---")
+    st.markdown("##### Exit strategy — scaling out (published approx prices)")
+    st.caption("From the Cryptos sheet: start trimming / 75% exited / 90% exited.")
+    exit_rows = []
+    for c in CRYPTO_ASSETS:
+        if c.get("trim_start") is None:
+            continue
+        exit_rows.append(
+            "<tr>"
+            + _cell(_e(c["name"]))
+            + _cell(fmt_money(c["trim_start"]))
+            + _cell(fmt_money(c.get("trim_75")))
+            + _cell(fmt_money(c.get("trim_90")))
+            + "</tr>"
+        )
+    th = "".join(f"<th>{_e(h)}</th>" for h in ["Asset", "Start trimming", "Exited 75%", "Exited 90%"])
+    st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                + "".join(exit_rows) + "</table>", unsafe_allow_html=True)
+    st.info("Rule from the sheet: *The higher you buy the more likely you will be left holding the bag when cryptos turn lower — so have a mechanism to STOP adding and start selling.*")
+
+
+def render_egf_tab(metrics_by_ticker: dict, quotes: dict, zones: dict) -> None:
+    st.subheader("📈 EGF — Earnings Growth Factor")
+    _how_to_box("How to use this tab", [
+        "EGF is Walayat's core metric: how fast earnings are growing, and which way the growth is travelling.",
+        "Positive EGF + cheap PE-range = accumulate candidate. Negative EGF demands a LOW P/E before you add.",
+        "EGF-12M is the forward look — strong 12M with a weak live print often means 'wait for the dip, then load'.",
+        "The history table is copied from his EGFs sheet (aggregates for the AI book). Live per-ticker EGF proxy is from Yahoo forward vs trailing EPS — a stand-in for his hand-built figure, labelled as a proxy.",
+        "Never invent an EGF. If Yahoo has no forward/trailing EPS, the cell is an em-dash.",
+    ])
+
+    # History from sheet
+    st.markdown("##### AI book EGF history (from EGFs sheet)")
+    st.caption("Published aggregates — Ex-Micron / Ex-TSLA columns as on the sheet. Stored as fractions, shown as %.")
+    rows = []
+    for r in EGF_HISTORY:
+        def pct(x):
+            return DASH if x is None else f"{x*100:.0f}%"
+        rows.append(
+            "<tr>"
+            + _cell(_e(r["date"]))
+            + _cell(_e(f"{r['spx']:,}" if r.get("spx") else DASH))
+            + _cell(_e(f"{r['nasdaq']:,}" if r.get("nasdaq") else DASH))
+            + _cell(_e(pct(r.get("ai_av"))))
+            + _cell(_e(pct(r.get("ai_12m"))))
+            + _cell(_e(pct(r.get("pe"))))
+            + _cell(_e(pct(r.get("sec_av"))))
+            + _cell(_e(pct(r.get("sec_12m"))))
+            + _cell(_e(pct(r.get("sec_pe"))))
+            + _cell(_e(r.get("comments") or ""))
+            + "</tr>"
+        )
+    heads = ["Date", "S&P", "Nasdaq", "AI EGF Av", "AI EGF 12M", "PE range Av",
+             "Sec EGF", "Sec EGF 12M", "Sec PE range", "Comments"]
+    th = "".join(f"<th>{_e(h)}</th>" for h in heads)
+    st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                + "".join(rows) + "</table>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("##### Live EGF proxy by ticker (Yahoo forward÷trailing EPS − 1)")
+    st.caption("Sorted by EGF descending. Green = growing forward EPS. This is a PROXY for Walayat's EGF (he uses next-quarter estimates yfinance does not always expose).")
+    items = []
+    for t, m in (metrics_by_ticker or {}).items():
+        egf = m.get("egf")
+        if egf is None:
+            continue
+        s = BY_TICKER.get(t) or {"t": t, "name": t}
+        q = (quotes or {}).get(t)
+        price = q[0] if q else None
+        items.append((egf, t, s.get("name", t), price, m, zones.get(t, ZONE_WAIT)))
+    items.sort(reverse=True)
+    if not items:
+        st.caption("No EGF proxy available yet (fundamentals cache warming, or Yahoo omitted EPS).")
+    else:
+        rows = []
+        for egf, t, name, price, m, zone in items:
+            cls = ZONE_CLASSES.get(zone, "z-wait")
+            egf_html = f"<span class='{'c-ok' if egf > 0 else 'c-bad'}'>{egf*100:+.1f}%</span>"
+            rows.append(
+                "<tr>"
+                + _cell(_e(t), "tk")
+                + _cell(_e(name), f"nm {cls}")
+                + _cell(fmt_money(price))
+                + _cell(egf_html)
+                + _cell(fmt_g(m.get("eps_yoy")))
+                + _cell(fmt_g(m.get("rev_g")))
+                + _cell(fmt_n(m.get("fwd_pe")))
+                + _cell(fmt_n(m.get("peg")))
+                + _cell(_e(f"{m.get('score')}/10" if m.get("score") is not None else DASH))
+                + _cell(_e(zone), cls)
+                + "</tr>"
+            )
+        heads = ["Ticker", "Company", "Price", "EGF proxy", "EPS YoY", "Rev g",
+                 "Fwd P/E", "PEG", "FScore", "Zone"]
+        th = "".join(f"<th>{_e(h)}</th>" for h in heads)
+        st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                    + "".join(rows) + "</table>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("##### Reading EGF with the rest of the sheet")
+    st.markdown("""
+- **EGF rising + PE % of range low** → classic accumulate setup.
+- **EGF falling + PE % of range high** → distribute / stay in cash on that name.
+- **EGF negative** → only buy at the bottom of the published range (or not at all).
+- **EGF-12M >> live EGF** → growth is expected to re-accelerate; prefer waiting for a dip inside the buy range rather than chasing.
+- Pair this tab with **Fundamentals** (DCF / FScore) and **Monitor** (zone) before sizing.
+""")
+
+
+def render_big_picture_tab() -> None:
+    st.subheader("🖼️ Big Picture")
+    _how_to_box("How to use this tab", [
+        "Read this when you feel the urge to sell EVERYTHING or buy EVERYTHING — it is the antidote to headless-chicken mode.",
+        "The long-run S&P table shows that even buying the 2000 top still compounded ~8.5%/yr to Dec 2023. Time in > timing.",
+        "Use it to size psychology, not orders: keep powder dry, never sell the core at a loss, let the 10X brigade compound.",
+        "FX matters for non-US investors — a 'clever' GBP exit can cost 15% on the round trip. Factor it before large trims.",
+        "All figures below are from Walayat's Big Picture sheet (reference level 4,755 on 22 Dec 2023). Not live-updated.",
+    ])
+
+    st.markdown(
+        f"<div style='border:2px solid #FFB300; border-radius:10px; padding:14px 18px; "
+        f"background:rgba(255,179,0,0.07); margin-bottom:16px;'>"
+        + "".join(f"<div style='color:#FFD54F; font-size:15px; margin:6px 0;'>▸ {_e(m)}</div>"
+                  for m in BIG_PICTURE_MANTRAS)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("##### S&P long-run — annualised gain to 22 Dec 2023 (level 4,755)")
+    st.caption("Source: Big Picture sheet. 'Even the worst time to buy stocks in modern history still yields 8.5% per annum.'")
+    rows = []
+    for r in BIG_PICTURE_GAINS:
+        pct = DASH if r.get("pct") is None else f"{r['pct']*100:.0f}%"
+        av = DASH if r.get("av_yr") is None else f"{r['av_yr']*100:.1f}%"
+        rows.append(
+            "<tr>"
+            + _cell(_e(r["label"]))
+            + _cell(_e(f"{r['level']:,.2f}" if isinstance(r["level"], float) else f"{r['level']:,}"))
+            + _cell(_e(pct))
+            + _cell(_e(av))
+            + _cell(_e(r.get("note") or ""))
+            + "</tr>"
+        )
+    heads = ["From", "S&P level", "% gain to Dec 2023", "Av / yr", "Note"]
+    th = "".join(f"<th>{_e(h)}</th>" for h in heads)
+    st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                + "".join(rows) + "</table>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("##### Operating rules that fall out of the big picture")
+    for title, bullets in [
+        ("Stay invested in the mega-trend", [
+            "AI stocks lead the indices both ways — never time stock buys off the S&P/Nasdaq alone.",
+            "50% drawdowns are normal for good stocks; powder dry (~15% cash target) is how you buy them.",
+            "The 10X brigade is the pure expression of invest-and-forget.",
+        ]),
+        ("Accumulate / distribute, don't flip", [
+            "Buy valuations, not price predictions. Scale heavier the deeper it falls inside the range.",
+            "Trim into strength; never sell the investing book at a loss (works ~8/10).",
+            "No stop-losses on investing positions — they do the opposite of accumulating.",
+        ]),
+        ("Psychology", [
+            "The news is always bad — that is what gets eyeballs. Trust the metrics.",
+            "Your private-investor advantage: no redemptions, no benchmark. Use it.",
+            "When you feel FOMO or fear, open this tab, then open Monitor and execute the plan on the page.",
+        ]),
+    ]:
+        st.markdown(f"**{title}**")
+        for b in bullets:
+            st.markdown(f"- {b}")
+
+    st.caption("Distilled from the Big Picture tab of the AI Tech Stocks Portfolio spreadsheet "
+               "(Nadeem Walayat, MarketOracle.co.uk).")
+
+
+
 def inject_theme() -> None:
     """[THEME] main window = deep blue, sidebar = deep plum (user preference)."""
     st.markdown(
@@ -1649,6 +3128,12 @@ def inject_theme() -> None:
 
 def render_rules_tab():
     st.subheader("📖 Rules to Remember — Walayat's Investing Guide & Real Secret, distilled")
+    _how_to_box("How to use this tab", [
+        "Read the mantra first: ACCUMULATE when CHEAP → DISTRIBUTE when EXPENSIVE.",
+        "The 6 Real Secrets are about YOU (skill, focus, money management) — not indicators.",
+        "Use the guide groups as a pre-trade checklist: plan, valuations, trim rules, psychology, metrics.",
+        "When emotions spike, come here, then execute the levels on Monitor — do not improvise.",
+    ])
     st.markdown(
         f"<div style='border:2px solid #FFB300; border-radius:10px; padding:12px 16px; "
         f"background:rgba(255,179,0,0.07); font-size:16px; color:#FFD54F; font-weight:600;'>"
@@ -1768,15 +3253,35 @@ def main():
             for p in problems:
                 st.markdown(f"- {_e(p)}")
 
-    tab_monitor, tab_fund, tab_rules = st.tabs(
-        ["📈 Monitor", "🔬 Fundamentals", "📖 Rules to Remember"])
+    # Load overview + crypto (disk-first; prefetch already kicked them off).
+    overview = store.overview(day_key)
+    crypto_spot = store.crypto_spot()
+
+    (tab_monitor, tab_overview, tab_crypto, tab_egf,
+     tab_fund, tab_big, tab_rules) = st.tabs([
+        "📈 Monitor",
+        "🌐 Market Overview",
+        "🪙 Crypto",
+        "📈 EGF",
+        "🔬 Fundamentals",
+        "🖼️ Big Picture",
+        "📖 Rules to Remember",
+    ])
 
     with tab_monitor:
+        _how_to_box("How to use Monitor", [
+            "GREEN / ALL CAPS = price is inside (or below) the published buying range — accumulate.",
+            "WHITE = within the Near-% of the buy top (sidebar slider, default 10%) — get ready, do not chase.",
+            "RED / ALL CAPS = at or above the trim level — scale out into strength.",
+            "Tables are A–Z by ticker. 10X Brigade at top has 10-year targets and no trim (invest-and-forget).",
+            "Cross-check Market Overview (earnings this week) and EGF before sizing a BUY.",
+        ])
         render_zone_strip(zones, quotes, near_pct)
 
-        # ── ⭐ 10X BRIGADE ──────────────────────────────────────────────────
+        # ── ⭐ 10X BRIGADE (A–Z) ────────────────────────────────────────────
+        brigade_sorted = sorted(BRIGADE, key=lambda s: s["t"])
         rows = []
-        for s in BRIGADE:
+        for s in brigade_sorted:
             if s.get("static"):
                 rows.append(build_static_row(s))
                 continue
@@ -1792,14 +3297,13 @@ def main():
             + table_html(rows, target_label="10Yr Target") + "</div>",
             unsafe_allow_html=True)
 
-        # ── main list ───────────────────────────────────────────────────────
-        # PORTFOLIO, not STOCKS: the raw table still contains the delisted
-        # names, and iterating it here would render them as "NO DATA" rows.
-        stocks = PORTFOLIO
+        # ── main list (A–Z) ────────────────────────────────────────────────
+        stocks = sorted(PORTFOLIO, key=lambda s: s["t"])
         if only_actionable:
             stocks = [s for s in stocks
                       if zones.get(s["t"]) in (ZONE_BUY, ZONE_NEAR, ZONE_TRIM)]
         st.subheader("Portfolio")
+        st.caption("Sorted A–Z by ticker. Levels from 26 Aug article › sheet 25 Aug › briefs.")
         rows = [build_row(s, (quotes.get(s["t"]) or (None, None, None))[0],
                           (quotes.get(s["t"]) or (None, None, None))[1],
                           zones.get(s["t"], ZONE_WAIT), near_pct,
@@ -1809,22 +3313,42 @@ def main():
 
         with st.expander("ℹ️ Sources, exclusions & crypto reference"):
             st.markdown(
-                "**Article (26 Aug 2026)** — the 8 primaries (levels win where newer than the sheet) "
+                "**Article (26 Aug 2026)** — primaries (levels win where newer than the sheet) "
                 "+ author comments (NVDA stacked orders, BIDU / MRNA / CRM).  \n"
-                "**10X Brigade (17 Jul 2026)** — 14 ten-year candidates, always boxed at the top.  \n"
-                "**Trade Wind (11–25 Aug)** — FCX trim zone; brigade entries carry TW notes.  \n"
-                "**Portfolio CSV (25 Aug)** — buying ranges + trim mechanisms.  \n"
-                "**Stocks Briefs** — OXY ($40–74) / SLB ($32–60) ranges, FSLR sub-$200.  \n"
-                "**Excluded** — non-US listings (BESI shown static, SMSN.L, SMT.L, WTAI.L/INTL.L, "
-                "RBTX.L, UKW.L, BDEV.L, PRX.NV) and dead rows (MED, APM, CRSR, U, BPMC, BDSI).")
+                "**10X Brigade (17 Jul 2026)** — 14 ten-year candidates, boxed at the top, A–Z.  \n"
+                "**Portfolio CSV (25 Aug)** — buying ranges + trim mechanisms; filled previously "
+                "blank levels (TMO, BHP, CCJ, ALB, UNH, MSTR, …).  \n"
+                "**Stocks Briefs** — action/moat commentary + TMO $400–$450.  \n"
+                "**Excluded** — non-US listings (BESI static; SMSN.L, SMT.L, WTAI.L/INTL.L, "
+                "RBTX.L, UKW.L, BDEV.L, PRX.NV) and delisted (MPW, RDFN).")
             st.markdown(CRYPTO_REFERENCE)
             if missing:
                 st.caption("No data (check ticker on Yahoo Finance): " + ", ".join(missing))
 
+    with tab_overview:
+        render_market_overview_tab(overview, quotes, zones, metrics_map, near_pct)
+
+    with tab_crypto:
+        render_crypto_tab(crypto_spot, quotes, zones)
+
+    with tab_egf:
+        render_egf_tab(metrics_map, quotes, zones)
+
     with tab_fund:
         st.subheader("🔬 Fundamentals — full yfinance metric set")
-        render_fundamentals_tab(MONITORED, quotes, zones, funds, metrics_map,
+        _how_to_box("How to use this tab", [
+            "Sort mentally by FScore and EGF first, then check DCF upside as a second opinion — not a target.",
+            "A name in BUY on Monitor with FScore ≥ 7 and positive EGF is the cleanest accumulate setup.",
+            "DCF is two-stage (5y growth → 5y fade → perpetuity). Tune WACC / terminal g in the sidebar; higher WACC = more conservative.",
+            "Debt ratio shows D/E when equity is reported, else D/C — read the basis, not just the number.",
+            "Table is A–Z by ticker. Missing Yahoo fields stay as em-dashes.",
+        ])
+        fund_list = sorted(MONITORED, key=lambda s: s["t"])
+        render_fundamentals_tab(fund_list, quotes, zones, funds, metrics_map,
                                 wacc=wacc_pct / 100.0, terminal_g=tg_pct / 100.0)
+
+    with tab_big:
+        render_big_picture_tab()
 
     with tab_rules:
         render_rules_tab()
