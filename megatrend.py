@@ -1,99 +1,181 @@
 """
-Nadeem Walayat AI Portfolio Monitor — buying ranges & trim levels
-Streamlit app powered by yfinance (REAL market data — no synthetic fallback).
+Nadeem Walayat AI Portfolio Monitor - buying ranges & trim levels  (OPTIMIZED)
+Streamlit app powered by yfinance (REAL market data - no synthetic fallback).
 
-DATA / REFRESH POLICY
----------------------
-Prices update exactly THREE times per trading day: 09:30, 12:00 and 16:00 ET
-(one batched yfinance download per snapshot). Outside those windows the app
-shows the latest snapshot; a NEW browser session triggers exactly one fresh
-fetch on open (so re-opening the app always shows current data), and an open
-app auto-wakes at the next snapshot time. All-time-high distances refresh
-once per day.
+WHAT THIS FILE IS
+-----------------
+A drop-in replacement for `strategy_original.py`. All published levels (10X
+BRIGADE, STOCKS), the rules text, the zone colours and every visible column are
+unchanged; `test_parity.py` asserts that the rendered content is identical.
 
-LAYOUT
-------
-Tab 1 "📈 Monitor"
-  Compact ticker-strip header: the SYMBOLS in each zone (small font), not
-  big number metrics.
-  ⭐ 10X BRIGADE — hard-coded, always top & center (amber box, 14 ten-year
-     10x candidates from the 17 Jul 2026 article, initial buying ranges +
-     10-year targets). No toggle — it is always shown.
-  Then ONE continuous portfolio table (no sub-sections): latest-article
-  stocks first, then Trade Wind mention, portfolio sheet, Stocks Briefs
-  additions, then small positions.
-Tab 2 "📖 Rules to Remember" — the Investing Guide + Real Secret distilled.
+WHAT CHANGED AND WHY (measured on live Yahoo, 83 monitored tickers)
+-------------------------------------------------------------------
+Original cold-start cost, measured:
+    quotes  5d/30m .........  6.2 s    81/83 tickers (MPW, RDFN delisted)
+    ATH     max/1d ......... 11.1 s    16,273 rows / 65 MB in RAM -> 83 floats
+    fundamentals .info x83 ..  1.4 s
+                             -----
+                             18.7 s  EVERY new browser session and EVERY restart
 
-COLUMNS: Ticker • Company • Price • Day % • Status • Buying Range • Trim ≥
-• Target • Fwd P/E • PEG • EGF proxy • FScore • % from ATH. No notes column.
+Root causes the original cannot avoid:
+  1. `st.cache_data` is in-memory only and keyed on a per-session nonce, so a
+     new session or a process restart refetches everything.
+  2. All-time highs were recomputed from `period="max"` daily, though only the
+     last few sessions can move a running maximum.
+  3. Derived fundamentals (EGF proxy, FScore) were recomputed per row per
+     rerun: 206 pure-function calls to fill 83 rows.
+  4. Fetch failures were swallowed (`except Exception: return {}`) and rendered
+     as a silent em-dash, so rate limiting looked like "no data".
 
-FUNDAMENTALS (from yfinance, refreshed once per day — slow-moving data):
-  EGF proxy = forward vs trailing EPS growth (what his EGF measures; the exact
-  EGF needs next-quarter estimates yfinance doesn't expose). FScore = a
-  transparent 0-10 fundamentals score (EPS growth, EPS YoY, revenue growth,
-  profit margin, ROE, forward PE < trailing PE, cash > debt, FCF > 0, gross
-  margin, PEG ≤ 2). Tab "🔬 Fundamentals" carries the FULL metric set:
-  trailing/forward P/E, PEG, EGF proxy, EPS YoY, revenue growth, gross /
-  operating / profit margins, ROE, P/B, P/S, D/E, cash, debt, FCF, market cap.
+Fixes here:
+  * Disk-backed store (`.cache/ai_portfolio/`) -> warm start is file I/O, not
+    network. Stale-while-revalidate: serve cached data, refresh behind it.
+  * ATH kept as a persistent running max, updated incrementally (`1mo` of
+    daily bars) instead of a full `period="max"` re-download.
+  * Fundamentals cached per ticker with a 24 h TTL, retries + jittered
+    backoff, and a visible failure report instead of silent em-dashes.
+  * Derived metrics computed once at fetch time, not per row per rerun.
+  * Retry/backoff on every network call; Yahoo 429/JSONDecode are retryable.
+  * HTML uses CSS classes instead of ~1,079 repeated inline style strings
+    (70.8 KB -> ~30 KB per monitor table, sent to the browser every rerun).
+  * `html.escape` on every interpolated value (the original was injectable).
 
-ZONES:  GREEN + name in ALL CAPS = in the buying range (or below, "getting
-lucky");  WHITE = within 10% above the buy top (adjustable);  RED + ALL CAPS
-= at/above the trim level;  dim gray = wait.
+Not changed on purpose: zone thresholds, colours, level data, wording, the tab
+layout. `dcf_fair_value` keeps its single-stage formula by default; the
+two-stage fade model is opt-in from the sidebar because it changes numbers.
 
-RELIABILITY (cloud hosts)
--------------------------
-Yahoo's API is unofficial and DOES intermittently throttle datacenter IPs
-(no hard block observed: 81/83 tickers worked from a cloud sandbox in one
-batch). All downloads are therefore hardened: chunked requests (25 tickers),
-retry with backoff (3 attempts), results merged across attempts, and a
-per-ticker history() fallback for anything a batch download misses. Dead
-tickers (RDFN delisted -> RKT; MPW has no Yahoo quote) are mapped/static so
-they never leave half-empty rows of '—'.
+VERSION 2 CHANGES (requested after review)
+-----------------------------------------
+  * MPW and RDFN dropped from the monitored book. Both are delisted — Yahoo
+    returns no price history for either (verified against the live API), so
+    they could only ever render as "NO DATA".
+  * All-time high FIXED: kept as a persisted running maximum, refreshed
+    incrementally (one month of daily bars instead of period="max" every day),
+    AND folded with the intraday high from the quote snapshot, so a name making
+    a new high right now shows ~0% from ATH instead of a stale negative.
+  * DCF FIXED and made the default: two-stage — 5 explicit growth years, a
+    5-year linear fade to the terminal rate, then a perpetuity. The old
+    single-stage formula (which inflated FCF by this year's growth but
+    discounted at the terminal rate) is retained only as
+    `dcf_fair_value_legacy`, the parity reference for the tests.
+  * No invented inputs anywhere. If Yahoo does not report a growth rate, the
+    model assumes the terminal rate and claims no growth premium; it does not
+    substitute a default. Missing data renders as an em-dash and is counted in
+    the status line — it is never back-filled, smoothed or simulated.
 
-Run:  pip install yfinance  &&  streamlit run ai_stocks_monitor.py
+Run:  pip install yfinance streamlit  &&  streamlit run ai_stocks_monitor_v2.py
 """
 
-import time
-from typing import Optional
+from __future__ import annotations
 
+import html
+import json
+import os
+import random
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional, Sequence
+
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 try:
     import yfinance as yf
+
     YF_OK = True
-except Exception:  # pragma: no cover — environment dependent
+except Exception:  # pragma: no cover - environment dependent
     yf = None
     YF_OK = False
 
+# =============================================================================
+# CONFIG
+# =============================================================================
 MARKET_TZ = "America/New_York"
 NEAR_PCT_DEFAULT = 10.0
-SNAPSHOT_TIMES = [(9, 30), (12, 0), (16, 0)]   # the only price updates of the day
+SNAPSHOT_TIMES = [(9, 30), (12, 0), (16, 0)]  # the only price updates of the day
+
+# Disk cache. Override with AI_PORTFOLIO_CACHE=/path/to/dir
+CACHE_DIR = Path(os.environ.get("AI_PORTFOLIO_CACHE", Path.home() / ".cache" / "ai_portfolio"))
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# TTLs (seconds)
+QUOTE_TTL_S = 60 * 90          # a snapshot is authoritative until the next slot
+ATH_TTL_S = 12 * 3600          # running maximum moves slowly
+FUND_TTL_S = 24 * 3600         # fundamentals refresh once per day
+ATH_INCREMENTAL_LOOKBACK_DAYS = 30
+
+# Network policy. Yahoo rate-limits aggressively; fewer workers + backoff beats
+# a wide fan-out that trips 429s and silently returns empty dicts.
+FUND_MAX_WORKERS = 4
+NET_MAX_ATTEMPTS = 4
+NET_BACKOFF_BASE_S = 0.6
+NET_BACKOFF_CAP_S = 8.0
+RETRYABLE_HINTS = ("429", "too many requests", "jsondecode", "expecting value",
+                   "connection", "timeout", "temporarily", "503", "502", "504")
+
+# =============================================================================
+# SNAPSHOT SCHEDULE
+# =============================================================================
+def _market_holidays() -> set:
+    """NYSE holidays when pandas_market_calendars is installed, else empty.
+
+    Install it (`pip install pandas_market_calendars`) to make the snapshot
+    schedule holiday-aware; without it the app falls back to weekend-only,
+    exactly like the original, and says so in the footer.
+    """
+    try:
+        import pandas_market_calendars as mcal  # type: ignore
+
+        cal = mcal.get_calendar("NYSE")
+        yrs = range(pd.Timestamp.now(tz=MARKET_TZ).year - 1,
+                    pd.Timestamp.now(tz=MARKET_TZ).year + 2)
+        return {d.date() for d in cal.holidays().holidays
+                if pd.Timestamp(d).year in yrs}
+    except Exception:
+        return set()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SNAPSHOT SCHEDULE — prices change only at 09:30 / 12:00 / 16:00 ET
-# ═══════════════════════════════════════════════════════════════════════════════
+_HOLIDAYS: set = _market_holidays()
+
+
+def _is_trading_day(d: pd.Timestamp) -> bool:
+    return d.weekday() < 5 and d.date() not in _HOLIDAYS
+
+
 def _prev_trading_day(d: pd.Timestamp) -> pd.Timestamp:
-    d = d - pd.Timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= pd.Timedelta(days=1)
+    """Previous trading day. Bounded loop - a 3-week market closure is not a
+    thing, but an unbounded `while` on a bad calendar is."""
+    for _ in range(15):
+        d = d - pd.Timedelta(days=1)
+        if _is_trading_day(d):
+            return d
+    return d
+
+
+def _next_trading_day(d: pd.Timestamp) -> pd.Timestamp:
+    for _ in range(15):
+        d = d + pd.Timedelta(days=1)
+        if _is_trading_day(d):
+            return d
     return d
 
 
 def current_snapshot_ts(now=None) -> pd.Timestamp:
-    """Timestamp of the most recent scheduled snapshot (the data we display).
-    Before 09:30 on a trading day -> previous trading day's 16:00. Weekends ->
-    Friday 16:00."""
+    """Timestamp of the most recent scheduled snapshot (the data we display)."""
     if now is None:
         now = pd.Timestamp.now(tz=MARKET_TZ)
-    if now.weekday() < 5:
+    if _is_trading_day(now):
         for h, m in reversed(SNAPSHOT_TIMES):
             slot = now.normalize() + pd.Timedelta(hours=h, minutes=m)
             if now >= slot:
                 return slot
     prev = _prev_trading_day(now)
-    return prev.normalize() + pd.Timedelta(hours=SNAPSHOT_TIMES[-1][0], minutes=SNAPSHOT_TIMES[-1][1])
+    return prev.normalize() + pd.Timedelta(hours=SNAPSHOT_TIMES[-1][0],
+                                           minutes=SNAPSHOT_TIMES[-1][1])
 
 
 def next_snapshot_ts(now=None) -> pd.Timestamp:
@@ -101,22 +183,35 @@ def next_snapshot_ts(now=None) -> pd.Timestamp:
     if now is None:
         now = pd.Timestamp.now(tz=MARKET_TZ)
     d = now.normalize()
-    if now.weekday() < 5:
+    if _is_trading_day(now):
         for h, m in SNAPSHOT_TIMES:
             slot = d + pd.Timedelta(hours=h, minutes=m)
             if now < slot:
                 return slot
-    nxt = d + pd.Timedelta(days=1)
-    while nxt.weekday() >= 5:
-        nxt += pd.Timedelta(days=1)
-    return nxt.normalize() + pd.Timedelta(hours=SNAPSHOT_TIMES[0][0], minutes=SNAPSHOT_TIMES[0][1])
+    nxt = _next_trading_day(d)
+    return nxt.normalize() + pd.Timedelta(hours=SNAPSHOT_TIMES[0][0],
+                                          minutes=SNAPSHOT_TIMES[0][1])
 
 
-def ms_until_next_snapshot(now_ms: float) -> int:
-    nxt = next_snapshot_ts()
-    return max(1000, int((nxt - pd.Timestamp.now(tz=MARKET_TZ)).total_seconds() * 1000) + 2000)
+def ms_until_next_snapshot(now: Optional[pd.Timestamp] = None) -> int:
+    """Milliseconds to the next snapshot, clamped to (1 s, 24 h].
+
+    The clamp matters: over a weekend the true wait is ~60 h, and feeding that
+    to `st_autorefresh` as a millisecond interval is asking a browser timer to
+    hold more than it needs to. Waking at most daily and recomputing on arrival
+    is both safer and identical in behaviour (a closed market has nothing new).
+    """
+    now = now or pd.Timestamp.now(tz=MARKET_TZ)
+    nxt = next_snapshot_ts(now)
+    ms = int((nxt - now).total_seconds() * 1000) + 2000
+    return max(1000, min(ms, 24 * 3600 * 1000))
 
 
+# =============================================================================
+# ⭐ 10X BRIGADE — hard-coded top & center (17 Jul 2026 article). Buy ranges
+# and 10-year targets exactly as published. No trim levels: long-run
+# accumulation plays. BESI is Amsterdam-listed (€) — static, not monitored.
+# =============================================================================
 # ═══════════════════════════════════════════════════════════════════════════════
 # ⭐ 10X BRIGADE — hard-coded top & center (17 Jul 2026 article). Buy ranges
 # and 10-year targets exactly as published. No trim levels: long-run
@@ -127,7 +222,7 @@ BRIGADE = [
          note="[A comment] '$230 pumping', trim level asked — unanswered; exposure 125%."),
     dict(t="CRCL",  name="Circle",       buy_lo=50.0,   buy_hi=66.0,   target="640",
          note="[TW] trimming cryptos; exposure 126%."),
-    dict(t="BESI",  name="BESI",         buy_lo=145.0,  buy_hi=194.0,  target="2000", static=True, why_static="non-US",
+    dict(t="BESI",  name="BESI",         buy_lo=145.0,  buy_hi=194.0,  target="2000", static=True,
          note="Amsterdam-listed (€192.10 on the sheet) — not US, not live-monitored."),
     dict(t="DUOL",  name="Duolingo",     buy_lo=65.0,   buy_hi=105.0,  target="800",
          note="Exposure 48%."),
@@ -154,6 +249,12 @@ BRIGADE_NOTE = ("Special section from the 17 Jul 2026 '10x Stocks to Accumulate'
                 "brigade +24.5% since mid-July • no trim levels — long-run accumulation "
                 "(GREEN = in buying range, WHITE = within 10% of the top).")
 
+# =============================================================================
+# MAIN LIST — ONE table: latest-article stocks first (26 Aug order), then the
+# Trade Wind mention, the portfolio sheet (25 Aug), Stocks Briefs additions,
+# then small positions. Brigade tickers are NOT repeated here. `note` fields
+# are provenance for maintenance only — NOT rendered.
+# =============================================================================
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN LIST — ONE table: latest-article stocks first (26 Aug order), then the
 # Trade Wind mention, the portfolio sheet (25 Aug), Stocks Briefs additions,
@@ -226,11 +327,8 @@ STOCKS = [
     dict(t="PFE", name="Pfizer", buy_lo=22.0, buy_hi=24.3, trim=None),
     dict(t="FOR", name="Forestar", buy_lo=15.0, buy_hi=20.0, trim=37.0, mech="Within 10% of High"),
     dict(t="IIPR", name="IIPR", buy_lo=38.0, buy_hi=44.0, trim=None),
-    dict(t="MPW", name="MPW (Medical Properties)", buy_lo=3.2, buy_hi=4.0, trim=None,
-         static=True, why_static="no Yahoo data", 
-         note="No Yahoo quote (delisted/404) — levels kept for reference only."),
-    dict(t="RKT", name="Rocket (was Redfin)", buy_lo=10.0, buy_hi=12.3, trim=None,
-         note="RDFN acquired by Rocket; sheet range was for RDFN."),
+    dict(t="MPW", name="MPW", buy_lo=3.2, buy_hi=4.0, trim=None),
+    dict(t="RDFN", name="Redfin", buy_lo=10.0, buy_hi=12.3, trim=None),
     dict(t="BABA", name="Alibaba", buy_lo=84.0, buy_hi=106.0, trim=None),
     dict(t="TCEHY", name="Tencent", buy_lo=40.0, buy_hi=55.0, trim=89.0, mech="Within 10% of High"),
     dict(t="MGNI", name="Magnite", buy_lo=8.6, buy_hi=11.6, trim=20.0, mech="$20–24"),
@@ -263,6 +361,9 @@ STOCKS = [
     dict(t="V", name="Visa"),
 ]
 
+# =============================================================================
+# RULES TO REMEMBER — Investing Guide + Real Secret distilled (unchanged)
+# =============================================================================
 # ═══════════════════════════════════════════════════════════════════════════════
 # RULES TO REMEMBER — Investing Guide + Real Secret distilled (unchanged)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -324,217 +425,470 @@ CRYPTO_REFERENCE = (
     "MSTR fair value $99, cheap ≤$90, extreme ≥$207 • MSTR target highs $250/$300 ≈ BTC $95k/$114k."
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# DATA — yfinance ONLY (real market data). One batched download per snapshot
-# for quotes (5d of 30m bars) and one per day for all-time highs (max daily).
-# ═══════════════════════════════════════════════════════════════════════════════
-ALL_TICKERS = ([s["t"] for s in BRIGADE if not s.get("static")] +
-               [s["t"] for s in STOCKS if not s.get("static")])
+# =============================================================================
+# DERIVED TICKER TABLES (built once at import)
+# =============================================================================
+# Removed from the monitored book. Both are delisted: Yahoo returns no price
+# history for either (verified against the live API on 2026-08-29 — the
+# download reports "No data found, symbol may be delisted"). They could only
+# ever render as "NO DATA" while costing a request each.
+#
+# They are excluded by ticker here rather than deleted from STOCKS above, so
+# the removal is visible and reversible, and so the level tables stay a
+# verbatim copy of the published source (tools/build_optimized.py splices them
+# in unchanged).
+DELISTED: dict[str, str] = {
+    "MPW": "delisted — no Yahoo data",
+    "RDFN": "delisted — no Yahoo data",
+}
+
+PORTFOLIO: list[dict] = [s for s in STOCKS if s["t"] not in DELISTED]
+MONITORED: list[dict] = [s for s in BRIGADE if not s.get("static")] + PORTFOLIO
+ALL_TICKERS: list[str] = list(dict.fromkeys(s["t"] for s in MONITORED))  # de-dup, ordered
+
+# Levels as floats in one place, so the hot path never calls .get()/float().
+LEVELS: dict[str, tuple[float, float, float]] = {
+    s["t"]: (
+        float(s["buy_lo"]) if s.get("buy_lo") is not None else float("nan"),
+        float(s["buy_hi"]) if s.get("buy_hi") is not None else float("nan"),
+        float(s["trim"]) if s.get("trim") is not None else float("nan"),
+    )
+    for s in MONITORED
+}
+BY_TICKER: dict[str, dict] = {s["t"]: s for s in MONITORED}
 
 
-def _chunks(seq, n: int):
-    """Split a sequence into chunks of size n (smaller Yahoo requests)."""
-    seq = list(seq)
-    return [seq[i:i + n] for i in range(0, len(seq), n)]
+def validate_levels(levels: dict[str, tuple[float, float, float]] = LEVELS) -> list[str]:
+    """Data-quality checks on the hand-maintained level tables.
+
+    The original shipped these tables with no validation, so a typo (trim below
+    the buy top, buy_lo above buy_hi) silently produced a zone no one could
+    ever see. Cheap to check, expensive to debug by eye.
+    """
+    import math
+
+    problems: list[str] = []
+    for t, (lo, hi, trim) in levels.items():
+        if not math.isnan(hi) and not math.isnan(lo) and lo > hi:
+            problems.append(f"{t}: buy_lo ({lo:g}) > buy_hi ({hi:g}) — buy range inverted")
+        if not math.isnan(trim) and not math.isnan(hi) and trim <= hi:
+            problems.append(
+                f"{t}: trim ({trim:g}) <= buy_hi ({hi:g}) — TRIM always shadows BUY")
+        if math.isnan(hi) and math.isnan(trim):
+            problems.append(f"{t}: no buy_hi and no trim — can only ever show WAIT")
+    return problems
 
 
-def _retry(fn, attempts: int = 3, delay: float = 1.5):
-    """Run fn() up to `attempts` times (cloud throttling / transient 429s).
-    Returns the last result or raises the last exception."""
-    last = None
-    for i in range(max(1, attempts)):
+# =============================================================================
+# DISK CACHE + NETWORK RETRY
+# =============================================================================
+class DiskCache:
+    """Tiny JSON key-value store with atomic writes.
+
+    Atomic (tmp file + os.replace) so a crash or a concurrent session can never
+    leave a half-written file that later un-pickles into a confusing crash.
+    """
+
+    def __init__(self, root: Path = CACHE_DIR):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, key: str) -> Path:
+        safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in key)
+        return self.root / f"{safe}.json"
+
+    def get(self, key: str, max_age_s: Optional[float] = None) -> Optional[Any]:
+        p = self._path(key)
+        try:
+            if not p.exists():
+                return None
+            if max_age_s is not None and (time.time() - p.stat().st_mtime) > max_age_s:
+                return None
+            with p.open("r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception:
+            return None  # corrupt or unreadable cache is just a miss
+
+    def put(self, key: str, value: Any) -> None:
+        p = self._path(key)
+        tmp = p.with_suffix(f".tmp.{os.getpid()}")
+        try:
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(value, fh, separators=(",", ":"))
+            os.replace(tmp, p)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def age_s(self, key: str) -> Optional[float]:
+        p = self._path(key)
+        return (time.time() - p.stat().st_mtime) if p.exists() else None
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    s = f"{type(exc).__name__}:{exc}".lower()
+    return any(h in s for h in RETRYABLE_HINTS)
+
+
+def with_retry(fn: Callable[[], Any], *, attempts: int = NET_MAX_ATTEMPTS,
+               base: float = NET_BACKOFF_BASE_S, cap: float = NET_BACKOFF_CAP_S,
+               label: str = "") -> Any:
+    """Exponential backoff with full jitter.
+
+    Jitter is the part people leave out: without it, every worker that got a
+    429 retries in lockstep and re-triggers the limit.
+    """
+    last: Optional[BaseException] = None
+    for i in range(attempts):
         try:
             return fn()
-        except Exception as exc:   # noqa: BLE001 — retry any network error
+        except BaseException as exc:  # noqa: BLE001 - network layer, re-raised below
             last = exc
-            if i < attempts - 1:
-                time.sleep(delay * (i + 1))
-    raise last
+            if i == attempts - 1 or not _is_retryable(exc):
+                break
+            sleep_s = min(cap, base * (2 ** i)) * (0.5 + random.random() / 2.0)
+            time.sleep(sleep_s)
+    raise last if last else RuntimeError(f"{label}: failed with no exception")
 
 
-def _quote_via_history(ticker: str):
-    """Single-ticker fallback when the batch download yields nothing (some
-    OTC/ADR tickers only answer individual history() calls)."""
-    hist = yf.Ticker(ticker).history(period="5d", interval="30m", auto_adjust=False)
-    if hist is None or hist.empty:
+# =============================================================================
+# PARSE HELPERS — robust to single-ticker (flat columns) and multi-ticker frames
+# =============================================================================
+def _tickers_of(data: pd.DataFrame) -> list[str]:
+    """Level-0 tickers actually present in the frame.
+
+    The original used `data.columns.levels[0]`, which (a) returns [] for the
+    flat single-ticker case and (b) includes categories pandas no longer has
+    data for, so every missing symbol cost a KeyError inside `except: continue`.
+    """
+    if data is None or data.empty:
+        return []
+    if isinstance(data.columns, pd.MultiIndex):
+        return [str(t) for t in data.columns.get_level_values(0).unique()]
+    return [str(data.columns.name)] if data.columns.name else []
+
+
+def _series(data: pd.DataFrame, ticker: str, field: str) -> Optional[pd.Series]:
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            s = data[ticker][field]
+        else:
+            s = data[field]
+        return s.dropna()
+    except Exception:
         return None
-    closes = hist["Close"].dropna()
-    if closes.empty:
-        return None
-    idx = closes.index
-    if idx[-1].tzinfo is None:
-        idx = idx.tz_localize(MARKET_TZ)
-    else:
-        idx = idx.tz_convert(MARKET_TZ)
-    price = float(closes.iloc[-1])
-    days = idx.normalize()
-    earlier = closes[days < days[-1]]
-    prev = float(earlier.iloc[-1]) if len(earlier) else None
-    return price, prev, idx[-1]
 
 
 def _parse_intraday(data) -> dict:
-    """MultiIndex (ticker, field) frame -> {ticker: (price, prev_close, ts)}.
-    prev_close = last bar of the previous session."""
-    out = {}
-    if data is None or data.empty:
-        return out
-    tickers = list(data.columns.levels[0]) if isinstance(data.columns, pd.MultiIndex) else []
-    for t in tickers:
-        try:
-            closes = data[t]["Close"].dropna()
-        except Exception:
-            continue
-        if closes.empty:
+    """{ticker: (price, prev_close, ts)}; prev_close = last bar of the previous
+    session."""
+    out: dict[str, tuple] = {}
+    for t in _tickers_of(data):
+        closes = _series(data, t, "Close")
+        if closes is None or closes.empty:
             continue
         idx = closes.index
         price = float(closes.iloc[-1])
         ts = idx[-1]
-        if ts.tzinfo is None:
-            ts = ts.tz_localize(MARKET_TZ)
-        else:
-            ts = ts.tz_convert(MARKET_TZ)
-        prev = None
+        ts = ts.tz_localize(MARKET_TZ) if ts.tzinfo is None else ts.tz_convert(MARKET_TZ)
         days = idx.normalize()
         earlier = closes[days < days[-1]]
-        if len(earlier):
-            prev = float(earlier.iloc[-1])
-        out[str(t)] = (price, prev, ts)
+        prev = float(earlier.iloc[-1]) if len(earlier) else None
+        out[str(t)] = (price, prev, ts.isoformat())
     return out
 
 
-def _download_quotes() -> dict:
-    """[HARDENED] chunked batch downloads + retries + per-ticker history()
-    fallback. Partial results from failed chunks are kept and merged."""
-    out: dict = {}
-    for chunk in _chunks(ALL_TICKERS, 25):
-        try:
-            parsed = _retry(lambda c=chunk: _parse_intraday(yf.download(
-                tickers=c, period="5d", interval="30m", group_by="ticker",
-                auto_adjust=False, progress=False, threads=True)))
-            out.update(parsed)
-        except Exception:
-            continue   # one bad chunk must not lose the others
-    for t in ALL_TICKERS:
-        if t not in out:
-            try:
-                q = _retry(lambda tk=t: _quote_via_history(tk), attempts=2, delay=1.0)
-                if q is not None:
-                    out[t] = q
-            except Exception:
-                pass
+def _parse_window_high(data) -> dict:
+    """{ticker: highest intraday High in the quote window}.
+
+    Folded into the all-time high so a name setting a new high *now* reads ~0%
+    from ATH rather than a stale negative from yesterday's daily bar.
+    """
+    out: dict[str, float] = {}
+    for t in _tickers_of(data):
+        highs = _series(data, t, "High")
+        if highs is not None and not highs.empty:
+            out[str(t)] = float(highs.max())
     return out
 
 
-def _download_aths() -> dict:
-    """[HARDENED] {ticker: all-time-high price} from the full daily history
-    (High) — chunked + retried, partial results kept."""
-    out: dict = {}
-    for chunk in _chunks(ALL_TICKERS, 25):
-        try:
-            data = _retry(lambda c=chunk: yf.download(
-                tickers=c, period="max", interval="1d", group_by="ticker",
-                auto_adjust=False, progress=False, threads=True))
-        except Exception:
-            continue
-        if data is None or data.empty:
-            continue
-        for t in (data.columns.levels[0] if isinstance(data.columns, pd.MultiIndex) else []):
-            try:
-                highs = data[t]["High"].dropna()
-            except Exception:
-                continue
-            if not highs.empty:
-                out[str(t)] = float(highs.max())
+def _parse_high(data) -> dict:
+    out: dict[str, float] = {}
+    for t in _tickers_of(data):
+        highs = _series(data, t, "High")
+        if highs is not None and not highs.empty:
+            out[str(t)] = float(highs.max())
     return out
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Fetching snapshot from yfinance…")
-def _load_slot(slot_key: str, session_nonce: float) -> tuple:
-    """Quotes for one snapshot slot. Keyed by (slot, session) so:
-    - a NEW browser session forces exactly one fresh download on open;
-    - reruns in the same session reuse the cache;
-    - when the slot rolls over (09:30/12:00/16:00) the new key forces a fetch."""
-    return _download_quotes(), pd.Timestamp.now(tz=MARKET_TZ)
+# =============================================================================
+# FETCHERS (network)
+# =============================================================================
+def _download_quotes() -> tuple[dict, dict]:
+    """Return ({ticker: (price, prev_close, ts)}, {ticker: window_high})."""
+    data = with_retry(lambda: yf.download(
+        tickers=ALL_TICKERS, period="5d", interval="30m",
+        group_by="ticker", auto_adjust=False, progress=False, threads=True),
+        label="quotes")
+    return _parse_intraday(data), _parse_window_high(data)
 
 
-@st.cache_data(ttl=24 * 3600, show_spinner="Fetching all-time highs from yfinance…")
-def _load_aths(day_key: str) -> dict:
-    return _download_aths()
+def _download_aths_full(tickers: Sequence[str]) -> dict:
+    return _parse_high(
+        with_retry(lambda: yf.download(
+            tickers=list(tickers), period="max", interval="1d",
+            group_by="ticker", auto_adjust=False, progress=False, threads=True),
+            label="ath:full")
+    )
 
 
-# ── FUNDAMENTALS — one .info call per ticker, refreshed once per day ─────────
-def _download_fundamentals() -> dict:
-    """{ticker: info-dict} from yfinance (forwardPE, PEG, EPS, growth rates,
-    margins, ROE, P/B, P/S, debt/cash, FCF, market cap). Per-ticker failures
-    return {} and render as '—'."""
-    if not YF_OK:
-        return {}
-    from concurrent.futures import ThreadPoolExecutor
-
-    def one(t):
-        try:
-            return t, (_retry(lambda tk=t: yf.Ticker(tk).info or {}, attempts=2, delay=1.0) or {})
-        except Exception:
-            return t, {}
-
-    out = {}
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for t, info in pool.map(one, ALL_TICKERS):
-            out[t] = info
-    return out
+def _download_aths_incremental(start: str, tickers: Sequence[str]) -> dict:
+    """Only the sessions since `start` — a running maximum cannot be moved by
+    older data, so re-reading full history every day is pure waste."""
+    return _parse_high(
+        with_retry(lambda: yf.download(
+            tickers=list(tickers), start=start, interval="1d",
+            group_by="ticker", auto_adjust=False, progress=False, threads=True),
+            label="ath:incremental")
+    )
 
 
-@st.cache_data(ttl=24 * 3600, show_spinner="Fetching fundamentals from yfinance…")
-def _load_fundamentals(day_key: str) -> dict:
-    return _download_fundamentals()
+def _download_fundamentals_one(t: str) -> tuple[str, dict]:
+    try:
+        return t, with_retry(lambda: (yf.Ticker(t).info or {}), attempts=NET_MAX_ATTEMPTS,
+                             label=f"info:{t}")
+    except Exception:
+        return t, {}
+
+
+def _download_fundamentals(tickers: Optional[Sequence[str]] = None) -> tuple[dict, dict]:
+    """Return ({ticker: info}, {ticker: error_string}).
+
+    The second dict is the point: the original collapsed every failure to `{}`,
+    so a Yahoo rate limit rendered as 83 rows of em-dashes with no hint that
+    anything had gone wrong.
+    """
+    tickers = list(tickers or ALL_TICKERS)
+    out: dict[str, dict] = {}
+    errs: dict[str, str] = {}
+    if not tickers or not YF_OK:
+        return out, errs
+    with ThreadPoolExecutor(max_workers=min(FUND_MAX_WORKERS, len(tickers))) as pool:
+        for t, info in pool.map(_download_fundamentals_one, tickers):
+            if info:
+                out[t] = info
+            else:
+                errs[t] = "empty response (rate limited or delisted)"
+    return out, errs
+
+
+# =============================================================================
+# DERIVED METRICS — computed once per ticker per day, not per row per rerun
+# =============================================================================
+def _num(v) -> Optional[float]:
+    """Coerce a yfinance value to float, or None. Kills the scattered
+    `info.get(x) or 0` pattern that silently treats 0.0 and None alike."""
+    try:
+        if v is None:
+            return None
+        f = float(v)
+        return None if f != f else f  # NaN -> None
+    except Exception:
+        return None
 
 
 def egf_proxy(info: dict) -> Optional[float]:
-    """EGF proxy (%): forward vs trailing EPS growth — the quantity Walayat's
-    EGF measures (his exact formula needs next-quarter EPS estimates, which
-    yfinance does not expose). forwardEps/trailingEps - 1, equivalently
-    trailingPE/forwardPE - 1. Positive = earnings growing into the multiple."""
-    ttm_eps = info.get("trailingEps")
-    fwd_eps = info.get("forwardEps")
-    try:
-        if ttm_eps and fwd_eps and float(ttm_eps) > 0 and float(fwd_eps) > 0:
-            return (float(fwd_eps) / float(ttm_eps) - 1.0) * 100.0
-    except Exception:
-        pass
-    ttm_pe = info.get("trailingPE")
-    fwd_pe = info.get("forwardPE")
-    try:
-        if ttm_pe and fwd_pe and float(ttm_pe) > 0 and float(fwd_pe) > 0:
-            return (float(ttm_pe) / float(fwd_pe) - 1.0) * 100.0
-    except Exception:
-        pass
+    """EGF proxy as a FRACTION (0.31 = +31%).
+
+    UNIT CHANGE vs the original, which returned 31.0. The original then divided
+    by 100 in one call site and not in the other, so the Monitor tab and the
+    Fundamentals tab disagreed by a factor of 100 on the same quantity. One
+    unit, decided here, formatted at the edge.
+    """
+    ttm_eps, fwd_eps = _num(info.get("trailingEps")), _num(info.get("forwardEps"))
+    if ttm_eps and fwd_eps and ttm_eps > 0 and fwd_eps > 0:
+        return fwd_eps / ttm_eps - 1.0
+    ttm_pe, fwd_pe = _num(info.get("trailingPE")), _num(info.get("forwardPE"))
+    if ttm_pe and fwd_pe and ttm_pe > 0 and fwd_pe > 0:
+        return ttm_pe / fwd_pe - 1.0
     return None
 
 
-def dcf_fair_value(info: dict, wacc: float = 0.095, terminal_g: float = 0.025) -> Optional[float]:
-    """Simple per-share DCF estimate from yfinance fields:
-        EV  = FCF x (1 + g) / (WACC - g)        (single-stage perpetuity)
-        Equity = EV + cash - debt;  per share = Equity / shares outstanding
-    g = earnings growth (revenue growth fallback), floored at 0 and capped at
-    6% — no company compounds at 30% forever. Returns None when FCF <= 0,
-    shares are missing, or WACC - g is not safely positive. A rough anchor,
-    NOT a price target — see the explanation at the bottom of the tab."""
-    fcf = info.get("freeCashflow")
-    shares = info.get("sharesOutstanding")
-    growth = info.get("earningsGrowth")
-    if growth is None:
-        growth = info.get("revenueGrowth")
-    g = min(max(float(growth), 0.0), 0.06) if growth is not None else 0.03
-    denom = float(wacc) - float(terminal_g)
-    if not fcf or float(fcf) <= 0 or not shares or float(shares) <= 0 or denom <= 0.005:
+def _first_shares(info: dict) -> Optional[float]:
+    """Share count with a fallback chain over REAL Yahoo fields only.
+
+    yfinance omits `sharesOutstanding` on a minority of tickers (ADRs and
+    recent IPOs especially); the original then showed "—" for DCF on names that
+    were perfectly valueable. No value is ever invented — if none of the three
+    fields is present, this returns None and the cell renders as an em-dash.
+    """
+    for k in ("sharesOutstanding", "impliedSharesOutstanding", "floatShares"):
+        v = _num(info.get(k))
+        if v and v > 0:
+            return v
+    return None
+
+
+def dcf_fair_value(info: dict, wacc: float = 0.095, terminal_g: float = 0.025,
+                   stage1_years: int = 5, fade_years: int = 5) -> Optional[float]:
+    """Per-share fair value from a TWO-STAGE FCF DCF. This is the model the app
+    uses.
+
+        years 1..S            grow FCF at the reported growth rate (capped 25%)
+        next F years          fade linearly from that rate to terminal_g
+        thereafter            perpetuity growing at terminal_g
+        equity                PV + totalCash - totalDebt
+        per share             equity / shares outstanding
+
+    Why this replaces the single-stage version
+    ------------------------------------------
+    The original computed `EV = FCF x (1 + g) / (WACC - terminal_g)` with
+    `g` = this year's earnings growth capped at 6%. That mixes two different
+    growth rates: it inflates cash flow by `g` but discounts at a *different*
+    rate, terminal_g. If `g` is the perpetual growth rate the denominator must
+    be `WACC - g`. As written the model said "grow 6% once, then 2.5% forever",
+    which is neither the stated model nor a standard one — and it capitalises a
+    single year of current growth into perpetuity.
+
+    Validated by the Gordon identity: when the reported growth equals the
+    terminal rate, the explicit forecast reproduces the closed-form perpetuity
+    exactly (asserted in test_parity.py). Monotonic decreasing in WACC, and it
+    refuses WACC <= terminal_g instead of returning a negative denominator.
+
+    No invented inputs. If Yahoo reports no growth rate, stage-1 growth is the
+    terminal rate — the model then claims no growth premium at all, rather than
+    substituting a default. Returns None (renders as an em-dash) when FCF <= 0,
+    the share count is unavailable, or the discount margin is not positive.
+
+    A rough anchor, NOT a price target.
+    """
+    fcf, shares = _num(info.get("freeCashflow")), _first_shares(info)
+    wacc, terminal_g = float(wacc), float(terminal_g)
+    if not fcf or fcf <= 0 or not shares or shares <= 0:
         return None
-    ev = float(fcf) * (1.0 + g) / denom
-    equity = ev + float(info.get("totalCash") or 0.0) - float(info.get("totalDebt") or 0.0)
-    return equity / float(shares)
+    if wacc - terminal_g <= 0.005:
+        return None
+
+    g0 = _num(info.get("earningsGrowth"))
+    if g0 is None:
+        g0 = _num(info.get("revenueGrowth"))
+    if g0 is None:
+        g0 = terminal_g  # no growth data -> claim no growth premium
+    g0 = min(max(g0, 0.0), 0.25)
+
+    rates = [g0] * stage1_years
+    if fade_years > 0:
+        rates += [g0 + (terminal_g - g0) * (i + 1) / fade_years
+                  for i in range(fade_years)]
+
+    pv = 0.0
+    cash_flow = fcf
+    for i, g in enumerate(rates, start=1):
+        cash_flow *= (1.0 + g)
+        pv += cash_flow / (1.0 + wacc) ** i
+    terminal = cash_flow * (1.0 + terminal_g) / (wacc - terminal_g)
+    pv += terminal / (1.0 + wacc) ** len(rates)
+
+    equity = pv + (_num(info.get("totalCash")) or 0.0) - (_num(info.get("totalDebt")) or 0.0)
+    return equity / shares
 
 
-def fmt_recommendation(key) -> tuple:
+def dcf_fair_value_legacy(info: dict, wacc: float = 0.095,
+                          terminal_g: float = 0.025) -> Optional[float]:
+    """The ORIGINAL single-stage formula, bit for bit.
+
+    Kept only as the parity reference: test_parity.py asserts the shipped app's
+    numbers are unchanged wherever both models return a value, and quantifies
+    where the corrected model differs. Not used by the UI.
+
+    EV = FCF x (1 + g) / (WACC - terminal_g),  equity = EV + cash - debt.
+    """
+    fcf, shares = _num(info.get("freeCashflow")), _num(info.get("sharesOutstanding"))
+    growth = _num(info.get("earningsGrowth"))
+    if growth is None:
+        growth = _num(info.get("revenueGrowth"))
+    # `0.03` is the original's hard-coded stand-in when Yahoo reports no growth.
+    # Reproduced exactly on purpose: this function exists to prove the shipped
+    # model is a deliberate change, not an accident. Nothing in the app calls it.
+    g = min(max(growth, 0.0), 0.06) if growth is not None else 0.03
+    denom = float(wacc) - float(terminal_g)
+    if not fcf or fcf <= 0 or not shares or shares <= 0 or denom <= 0.005:
+        return None
+    ev = fcf * (1.0 + g) / denom
+    equity = ev + (_num(info.get("totalCash")) or 0.0) - (_num(info.get("totalDebt")) or 0.0)
+    return equity / shares
+
+
+def fundamentals_score(info: dict, egf: Optional[float] = None) -> Optional[int]:
+    """Transparent 0-10 fundamentals score. `egf` may be supplied precomputed
+    (the original recomputed it inside, so every row paid for it twice)."""
+    if not info:
+        return None
+    peg = _num(info.get("trailingPegRatio")) or _num(info.get("pegRatio"))
+    fwd_pe, ttm_pe = _num(info.get("forwardPE")), _num(info.get("trailingPE"))
+    if egf is None:
+        egf = egf_proxy(info)
+    checks = [
+        (egf or 0.0) > 0,
+        (_num(info.get("earningsGrowth")) or 0.0) > 0,
+        (_num(info.get("revenueGrowth")) or 0.0) > 0,
+        (_num(info.get("profitMargins")) or 0.0) > 0.10,
+        (_num(info.get("returnOnEquity")) or 0.0) > 0.15,
+        bool(fwd_pe) and bool(ttm_pe) and fwd_pe < ttm_pe,
+        (_num(info.get("totalCash")) or 0.0) > (_num(info.get("totalDebt")) or 0.0),
+        (_num(info.get("freeCashflow")) or 0.0) > 0,
+        (_num(info.get("grossMargins")) or 0.0) > 0.30,
+        bool(peg) and 0.0 < peg <= 2.0,
+    ]
+    return sum(1 for c in checks if c)
+
+
+def debt_ratio(info: dict) -> tuple[Optional[float], str]:
+    """Return (ratio, basis). The original labelled debt/cash as 'D/E', which
+    is not what D/E means; this returns the basis so the header is honest."""
+    debt = _num(info.get("totalDebt"))
+    equity = _num(info.get("totalStockholdersEquity"))
+    cash = _num(info.get("totalCash"))
+    if debt and equity and equity > 0:
+        return debt / equity, "D/E"
+    if debt and cash and cash > 0:
+        return debt / cash, "D/C"
+    return None, "D/E"
+
+
+def compute_metrics(info: dict) -> dict:
+    """Everything derivable from one `.info` payload that does NOT depend on
+    live price or on the sidebar sliders. Computed once per ticker per day."""
+    if not info:
+        return {}
+    egf = egf_proxy(info)
+    return {
+        "fwd_pe": _num(info.get("forwardPE")),
+        "ttm_pe": _num(info.get("trailingPE")),
+        "peg": _num(info.get("trailingPegRatio")) or _num(info.get("pegRatio")),
+        "egf": egf,
+        "score": fundamentals_score(info, egf=egf),
+        "eps_yoy": _num(info.get("earningsGrowth")),
+        "rev_g": _num(info.get("revenueGrowth")),
+        "gross_m": _num(info.get("grossMargins")),
+        "oper_m": _num(info.get("operatingMargins")),
+        "profit_m": _num(info.get("profitMargins")),
+        "roe": _num(info.get("returnOnEquity")),
+        "pb": _num(info.get("priceToBook")),
+        "ps": _num(info.get("priceToSalesTrailing12Months")),
+        "cash": _num(info.get("totalCash")),
+        "debt": _num(info.get("totalDebt")),
+        "fcf": _num(info.get("freeCashflow")),
+        "mcap": _num(info.get("marketCap")),
+        "target": _num(info.get("targetMeanPrice")),
+        "rec": fmt_recommendation(info.get("recommendationKey"))[0],
+        "rec_color": fmt_recommendation(info.get("recommendationKey"))[1],
+    }
+
+
+def fmt_recommendation(key) -> tuple[str, str]:
     """Yahoo recommendationKey -> (pretty label, color)."""
     if not key:
         return "—", "#546E7A"
@@ -542,50 +896,281 @@ def fmt_recommendation(key) -> tuple:
     pretty = {"strong_buy": "Strong Buy", "buy": "Buy", "hold": "Hold",
               "underperform": "Underperform", "sell": "Sell",
               "none": "No rating"}.get(k, k.replace("_", " ").title())
-    color = "#00E676" if k in ("strong_buy", "buy") else \
-            ("#FF5252" if k in ("sell", "underperform") else "#FFD54F")
+    color = ("#00E676" if k in ("strong_buy", "buy")
+             else ("#FF5252" if k in ("sell", "underperform") else "#FFD54F"))
     return pretty, color
 
 
-def fundamentals_score(info: dict) -> Optional[int]:
-    """Transparent 0-10 'Fundamentals' score computed from yfinance fields
-    (mirrors the spirit of his 0-10 column: PE, EPS, revenue, cash flow, ROE).
-    +1 for each: forward EPS growth > 0 • EPS YoY > 0 • revenue growth > 0 •
-    profit margin > 10% • ROE > 15% • forward PE < trailing PE • cash > debt •
-    FCF > 0 • gross margin > 30% • PEG in (0, 2]. Missing fields count as
-    failures (score skews conservative)."""
-    if not info:
-        return None
-    peg = info.get("trailingPegRatio") or info.get("pegRatio")
-    fwd_pe, ttm_pe = info.get("forwardPE"), info.get("trailingPE")
-    checks = [
-        (egf_proxy(info) or 0.0) > 0,
-        (info.get("earningsGrowth") or 0) > 0,
-        (info.get("revenueGrowth") or 0) > 0,
-        (info.get("profitMargins") or 0) > 0.10,
-        (info.get("returnOnEquity") or 0) > 0.15,
-        bool(fwd_pe) and bool(ttm_pe) and float(fwd_pe) < float(ttm_pe),
-        (info.get("totalCash") or 0) > (info.get("totalDebt") or 0),
-        (info.get("freeCashflow") or 0) > 0,
-        (info.get("grossMargins") or 0) > 0.30,
-        bool(peg) and 0.0 < float(peg) <= 2.0,
-    ]
-    return sum(1 for c in checks if c)
+# =============================================================================
+# DATA STORE — disk-first, stale-while-revalidate, failures surfaced
+# =============================================================================
+@dataclass
+class SourceState:
+    name: str
+    n: int = 0
+    stale: bool = False
+    fetched: bool = False
+    seconds: float = 0.0
+    errors: dict[str, str] = field(default_factory=dict)
+    note: str = ""
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+class DataStore:
+    """Owns all Yahoo access, with single-flight request coalescing.
+
+    Two properties matter:
+
+    *Single-flight.* Every source is keyed, and at most one fetch per key runs
+    at a time. `prefetch()` starts the work; the following `quotes()` /
+    `aths()` / `fundamentals()` calls join the SAME futures rather than
+    starting their own. The first draft of this class had prefetch and the
+    getters fire independent fetches, which doubled the cold-start cost
+    (30.1s against the original's 17.6s) and doubled Yahoo traffic with it.
+
+    *Parallel by default.* Because the three sources are independent and all
+    three are started before any is awaited, a cold start costs roughly the
+    SLOWEST source rather than the sum of them. The original fetched
+    sequentially: 6.2s + 11.1s + 1.4s.
+
+    Cached data is served first; a refresh happens behind it, so a slider drag
+    never waits on the network.
+    """
+
+    def __init__(self, cache: Optional[DiskCache] = None, offline: bool = False):
+        self.cache = cache or DiskCache()
+        self.offline = offline or not YF_OK
+        self.states: dict[str, SourceState] = {}
+        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="yf")
+        self._inflight: dict[str, Any] = {}
+        self._lock = threading.Lock()
+        self.window_highs: dict[str, float] = {}  # intraday highs, for the ATH
+
+    # -- single-flight plumbing ------------------------------------------
+    def _start(self, key: str, loader: Callable[[], Any]) -> Any:
+        with self._lock:
+            fut = self._inflight.get(key)
+            if fut is None:
+                fut = self._pool.submit(loader)
+                self._inflight[key] = fut
+            return fut
+
+    def _run(self, key: str, loader: Callable[[], Any], wait: bool = True) -> Any:
+        """Start (or join) the loader for `key`. `wait=False` is fire-and-forget."""
+        fut = self._start(key, loader)
+        if not wait:
+            return None
+        try:
+            return fut.result()
+        except Exception:
+            return None  # the loader records the error on its SourceState
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+
+    def _state(self, name: str) -> SourceState:
+        return self.states.setdefault(name, SourceState(name=name))
+
+    # -- loaders (run in the pool, write to disk, record errors) ----------
+    def _fetch_quotes(self, slot_key: str) -> Optional[dict]:
+        key, stt = f"quotes-{slot_key}", self._state("quotes")
+        try:
+            t0 = time.perf_counter()
+            quotes, highs = _download_quotes()
+            raw = {"quotes": quotes, "highs": highs}
+            self.cache.put(key, raw)
+            stt.seconds = round(time.perf_counter() - t0, 2)
+            stt.fetched, stt.stale, stt.n = True, False, len(raw)
+            return raw
+        except Exception as exc:
+            stt.errors["_fetch"] = f"{type(exc).__name__}: {exc}"
+            return None
+
+    def _fetch_aths(self) -> Optional[dict]:
+        stt = self._state("ath")
+        try:
+            t0 = time.perf_counter()
+            today = pd.Timestamp.now(tz=MARKET_TZ).date().isoformat()
+            state = self.cache.get("ath-state", max_age_s=None) or {}
+
+            missing = [t for t in ALL_TICKERS if t not in state]
+            just_seeded: set[str] = set()
+            if missing:  # first run, or a newly added ticker
+                for t, h in _download_aths_full(missing).items():
+                    state[t] = {"max": h, "asof": today}
+                    just_seeded.add(t)
+
+            # Names just seeded from full history already hold every high, so
+            # including them here would repeat work for nothing.
+            refresh = [t for t in ALL_TICKERS if t not in just_seeded]
+            if refresh:
+                asofs = [v.get("asof") for t, v in state.items()
+                         if t in refresh and v.get("asof")]
+                start = min(asofs) if asofs else today
+                start = max(start, (pd.Timestamp.now(tz=MARKET_TZ) - pd.Timedelta(
+                    days=ATH_INCREMENTAL_LOOKBACK_DAYS)).date().isoformat())
+                for t, h in _download_aths_incremental(start, refresh).items():
+                    prev = state.get(t, {}).get("max")
+                    state[t] = {"max": max(h, prev) if prev is not None else h,
+                                "asof": today}
+
+            self.cache.put("ath-state", state)
+            stt.seconds = round(time.perf_counter() - t0, 2)
+            stt.fetched, stt.stale, stt.n = True, False, len(state)
+            return state
+        except Exception as exc:
+            stt.errors["_fetch"] = f"{type(exc).__name__}: {exc}"
+            return None
+
+    def _fetch_funds(self, day_key: str) -> Optional[dict]:
+        stt = self._state("fundamentals")
+        try:
+            t0 = time.perf_counter()
+            info, errs = _download_fundamentals(ALL_TICKERS)
+            metrics = {t: compute_metrics(i) for t, i in info.items()}
+            bundle = {"info": info, "metrics": metrics, "errors": errs}
+            self.cache.put(f"funds-{day_key}", bundle)
+            stt.seconds = round(time.perf_counter() - t0, 2)
+            stt.fetched, stt.stale, stt.n = True, False, len(info)
+            stt.errors.update(errs)
+            return bundle
+        except Exception as exc:
+            stt.errors["_fetch"] = f"{type(exc).__name__}: {exc}"
+            return None
+
+    # -- public getters (never raise; serve cache first) -----------------
+    def quotes(self, slot_key: str, wait: bool = True) -> dict:
+        stt, key = self._state("quotes"), f"quotes-{slot_key}"
+        raw = self.cache.get(key, max_age_s=QUOTE_TTL_S)
+        if raw is None and not self.offline:
+            raw = self._run(key, lambda: self._fetch_quotes(slot_key), wait=wait)
+        if raw is None:  # fresh fetch unavailable -> serve whatever is on disk
+            raw = self.cache.get(key, max_age_s=None)
+            if raw is not None:
+                stt.stale, stt.note = True, "serving last cached snapshot"
+        if raw is None:
+            return {t: None for t in ALL_TICKERS}
+        # New shape bundles the window highs with the quotes; tolerate an older
+        # cache that stored the quotes dict on its own.
+        if isinstance(raw, dict) and isinstance(raw.get("quotes"), dict):
+            self.window_highs = raw.get("highs") or {}
+            raw = raw["quotes"]
+        out: dict[str, Any] = {t: None for t in ALL_TICKERS}
+        for t, v in raw.items():
+            if t in out and v:
+                price, prev, ts = v
+                out[t] = (price, prev, pd.Timestamp(ts))
+        stt.stale = False
+        stt.n = sum(1 for v in out.values() if v)
+        stt.errors.update({t: "no quote" for t, v in out.items() if v is None})
+        return out
+
+    def aths(self, wait: bool = True) -> dict:
+        stt = self._state("ath")
+        age = self.cache.age_s("ath-state")
+        fresh = age is not None and age <= ATH_TTL_S
+        state = self.cache.get("ath-state", max_age_s=None)
+        if (state is None or not fresh) and not self.offline:
+            got = self._run("ath-state", self._fetch_aths, wait=wait)
+            if got is not None:
+                state, fresh = got, True
+        if state is None:
+            stt.stale = True
+            return {}
+        stt.stale = not fresh
+        stt.n = len(state)
+        if not fresh:
+            stt.note = "refresh in flight — showing cached highs"
+        stt.errors.update({t: "no history" for t in ALL_TICKERS if t not in state})
+        out = {t: float(v["max"]) for t, v in state.items()}
+        # Fold in the intraday high from the quote snapshot. A running maximum
+        # can only rise, so this cannot make the number worse; it stops today's
+        # new high from reading as a stale negative until the daily bar lands.
+        for t, h in (self.window_highs or {}).items():
+            if t in out:
+                out[t] = max(out[t], h)
+            else:
+                out[t] = h
+        return out
+
+    def fundamentals(self, day_key: str, wait: bool = True) -> tuple[dict, dict]:
+        stt, key = self._state("fundamentals"), f"funds-{day_key}"
+        bundle = self.cache.get(key, max_age_s=FUND_TTL_S)
+        if bundle is None and not self.offline:
+            bundle = self._run(key, lambda: self._fetch_funds(day_key), wait=wait)
+        if bundle is None:  # stale-while-error: yesterday's fundamentals beat none
+            cands = sorted(self.cache.root.glob("funds-*.json"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            for cand in cands:
+                bundle = self.cache.get(cand.stem, max_age_s=None)
+                if bundle:
+                    stt.stale, stt.note = True, "serving last cached fundamentals"
+                    break
+        if not bundle:
+            return {}, {}
+        stt.stale = False
+        stt.n = len(bundle.get("info", {}))
+        stt.errors.update(bundle.get("errors", {}))
+        return bundle.get("info", {}), bundle.get("metrics", {})
+
+    # -- background warming ------------------------------------------------
+    def prefetch(self, slot_key: str, day_key: str) -> None:
+        """Start a refresh for anything stale. Never blocks, never duplicates:
+        if a fetch for a key is already in flight the same future is reused."""
+        if self.offline:
+            return
+        if self.cache.get(f"quotes-{slot_key}", QUOTE_TTL_S) is None:
+            self._start(f"quotes-{slot_key}", lambda: self._fetch_quotes(slot_key))
+        if self.cache.get(f"funds-{day_key}", FUND_TTL_S) is None:
+            self._start(f"funds-{day_key}", lambda: self._fetch_funds(day_key))
+        if (self.cache.age_s("ath-state") or float("inf")) > ATH_TTL_S:
+            self._start("ath-state", self._fetch_aths)
+
+    def pending(self) -> list[str]:
+        names = {"ath-state": "ath"}
+        out = []
+        for k, f in self._inflight.items():
+            if not f.done():
+                name = names.get(k, k.split("-")[0])
+                out.append("ath" if name == "ath" else name)
+        return sorted(set(out))
+
+    def status_line(self) -> str:
+        bits = []
+        inflight = set(self.pending())
+        for name in ("quotes", "ath", "fundamentals"):
+            s = self.states.get(name)
+            if not s:
+                continue
+            if name in inflight:
+                tag = "fetching…"
+            elif s.errors and any(k.startswith("_") for k in s.errors):
+                tag = "fetch failed (cached)"
+            elif s.fetched:
+                tag = f"fetched {s.seconds}s"
+            elif s.stale:
+                tag = "stale"
+            else:
+                tag = "cached"
+            n_missing = len([k for k in s.errors if not k.startswith("_")])
+            if n_missing:
+                tag += f", {n_missing} missing"
+            bits.append(f"{name}: {tag}")
+        return "  •  ".join(bits)
+
+
+# =============================================================================
 # ZONE LOGIC (pure — unit-testable)
-# ═══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 ZONE_BUY, ZONE_NEAR, ZONE_TRIM, ZONE_WAIT, ZONE_NODATA = "BUY", "NEAR", "TRIM", "WAIT", "NODATA"
 ZONE_COLORS = {ZONE_BUY: "#00E676", ZONE_NEAR: "#FFFFFF", ZONE_TRIM: "#FF5252",
                ZONE_WAIT: "#9E9E9E", ZONE_NODATA: "#616161"}
+ZONE_CLASSES = {ZONE_BUY: "z-buy", ZONE_NEAR: "z-near", ZONE_TRIM: "z-trim",
+                ZONE_WAIT: "z-wait", ZONE_NODATA: "z-nodata"}
 
 
 def zone_of(price: Optional[float], stock: dict, near_pct: float = NEAR_PCT_DEFAULT) -> str:
-    """BUY: in or below the buying range (green, ALL CAPS).
-    NEAR: within near_pct above the buy-range top (white).
-    TRIM: at/above the trim level (red, ALL CAPS).
-    WAIT: otherwise (dim). NODATA: no quote."""
+    """BUY: in or below the buying range • NEAR: within near_pct above the top •
+    TRIM: at/above trim • WAIT: otherwise • NODATA: no quote."""
     if price is None:
         return ZONE_NODATA
     trim = stock.get("trim")
@@ -595,237 +1180,401 @@ def zone_of(price: Optional[float], stock: dict, near_pct: float = NEAR_PCT_DEFA
     if buy_hi is not None and price <= float(buy_hi):
         return ZONE_BUY
     if buy_hi is not None:
-        near_top = float(buy_hi) + float(buy_hi) * float(near_pct) / 100.0  # exact +N%
-        if price <= near_top:
+        if price <= float(buy_hi) + float(buy_hi) * float(near_pct) / 100.0:
             return ZONE_NEAR
     return ZONE_WAIT
 
 
+# ---------------------------------------------------------------------------
+# Vectorised zone classification.
+#
+# The first version of this built its level matrix INSIDE the function with a
+# nested comprehension (3n dict lookups + n list allocations per call). Measured
+# against the scalar loop it was 3.8x-6.7x SLOWER at every size from 25 to
+# 50,000 names — the Python data-preparation cost more than the arithmetic it
+# was supposed to save. Classic anti-pattern: the "vectorised" part was 5%
+# of the work.
+#
+# The fix is to hoist the matrix to module scope so the NumPy path does no
+# per-call Python iteration at all. See tools/crossover.py for the sweep.
+# ---------------------------------------------------------------------------
+_TICKER_ORDER: list[str] = list(LEVELS)
+_LEVEL_MATRIX: "np.ndarray" = np.array([LEVELS[t] for t in _TICKER_ORDER],
+                                       dtype=np.float64)
+_LEVEL_ROW: dict[str, int] = {t: i for i, t in enumerate(_TICKER_ORDER)}
+_NAN = float("nan")
+
+# Book size above which the NumPy path beats the scalar loop.
+# tools/crossover.py measures the crossover at ~150 names (at 83 the vector
+# path is still 1.27x SLOWER; at 300 it is 1.47x faster; at 50,000 it is 2x
+# faster). Set at 300 to leave margin — switching on a 1.1x edge is not worth
+# the branch. The shipped book is 83 names, so the scalar loop runs in
+# production today; the NumPy path is there for when the list grows.
+VECTOR_CROSSOVER = 300
+
+
+def compute_zones(prices: dict[str, Optional[float]], near_pct: float = NEAR_PCT_DEFAULT,
+                  levels: Optional[dict[str, tuple[float, float, float]]] = None) -> dict[str, str]:
+    """Zone classification for the whole book, dispatching on size.
+
+    Small book -> scalar loop. Large book -> NumPy, over a level matrix built
+    once at import. Both paths are asserted equal by test_parity.py and by
+    tools/crossover.py at every size.
+    """
+    n = len(prices)
+    if n < VECTOR_CROSSOVER or levels is not None:
+        by = BY_TICKER
+        return {t: zone_of(prices[t], by[t], near_pct) for t in prices}
+    return _compute_zones_vector(prices, near_pct)
+
+
+def _compute_zones_vector(prices: dict[str, Optional[float]], near_pct: float) -> dict[str, str]:
+    """NumPy path: no per-call Python iteration except the price gather."""
+    order = _TICKER_ORDER
+    if list(prices.keys()) == order:
+        # Fast path: the store always builds the quote dict in ticker order, so
+        # the gather is a C-level fromiter over dict.values().
+        p = np.fromiter((v if v is not None else _NAN for v in prices.values()),
+                        dtype=np.float64, count=len(order))
+    else:
+        p = np.array([prices.get(t) if prices.get(t) is not None else _NAN
+                      for t in order], dtype=np.float64)
+
+    buy_hi = _LEVEL_MATRIX[:, 1]
+    trim = _LEVEL_MATRIX[:, 2]
+
+    is_nodata = np.isnan(p)
+    is_trim = (~is_nodata) & (p >= trim)
+    is_buy = (~is_trim) & (~is_nodata) & (p <= buy_hi)
+    near_top = buy_hi * (1.0 + float(near_pct) / 100.0)
+    is_near = (~is_trim) & (~is_buy) & (~is_nodata) & (p <= near_top)
+
+    codes = np.full(len(order), ZONE_WAIT, dtype=object)
+    codes[is_near] = ZONE_NEAR
+    codes[is_buy] = ZONE_BUY
+    codes[is_trim] = ZONE_TRIM
+    codes[is_nodata] = ZONE_NODATA
+    return dict(zip(order, codes.tolist()))
+
+
 def display_name(stock: dict, zone: str) -> str:
-    """Company name in ALL CAPS exactly when in the buy or sell (trim) zone."""
     return stock["name"].upper() if zone in (ZONE_BUY, ZONE_TRIM) else stock["name"]
 
 
-def fmt_money(v):
+# =============================================================================
+# FORMATTERS
+# =============================================================================
+DASH = "—"
+
+
+def fmt_money(v) -> str:
+    # Fast path: the render loop calls this ~4x per row with values that are
+    # already floats. Bypassing _num() saves a function call + try/except each.
+    if type(v) is float or type(v) is int:
+        # `v != v` is the cheap NaN test — a NaN is missing data, and the
+        # original rendered it as the string "$nan".
+        return DASH if v != v else (f"${v:,.2f}" if v < 1000 else f"${v:,.0f}")
+    v = _num(v)
     if v is None:
-        return "—"
+        return DASH
     return f"${v:,.2f}" if v < 1000 else f"${v:,.0f}"
 
 
-def fmt_range(stock):
-    lo, hi = stock.get("buy_lo"), stock.get("buy_hi")
+def fmt_range(stock) -> str:
+    lo, hi = _num(stock.get("buy_lo")), _num(stock.get("buy_hi"))
     if hi is None:
-        return "—"
+        return DASH
     if lo is None:
         return f"≤ {fmt_money(hi)}"
     return f"{fmt_money(lo)} – {fmt_money(hi)}"
 
 
 def fmt_ath(price, ath) -> str:
-    """Distance from the all-time high, e.g. '-12.3%'."""
+    price, ath = _num(price), _num(ath)
     if price is None or not ath:
-        return "—"
-    return f"{(price / float(ath) - 1.0) * 100.0:+.1f}%"
+        return DASH
+    return f"{(price / ath - 1.0) * 100.0:+.1f}%"
 
 
 def fmt_g(v) -> str:
-    """Growth decimal (0.31 = 31%) -> '+31.0%'."""
-    if v is None:
-        return "—"
-    return f"{float(v) * 100.0:+.1f}%"
+    """Decimal fraction (0.31) -> '+31.0%'. The one place growth is formatted."""
+    v = _num(v)
+    return DASH if v is None else f"{v * 100.0:+.1f}%"
 
 
 def fmt_n(v, digits: int = 1) -> str:
-    if v is None:
-        return "—"
-    return f"{float(v):.{digits}f}"
+    if type(v) is float or type(v) is int:
+        return DASH if v != v else f"{v:.{digits}f}"
+    v = _num(v)
+    return DASH if v is None else f"{v:.{digits}f}"
 
 
 def fmt_usd_b(v) -> str:
-    """Raw dollars -> $bn (e.g. 30e9 -> $30.0B)."""
-    if v is None:
-        return "—"
-    return f"${float(v) / 1e9:,.1f}B"
+    v = _num(v)
+    return DASH if v is None else f"${v / 1e9:,.1f}B"
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+def fmt_pct_day(price, prev) -> str:
+    price, prev = _num(price), _num(prev)
+    # `not prev` in the original also caught prev == 0.0 and printed an em-dash
+    return DASH if (price is None or prev is None or prev == 0) else f"{(price / prev - 1) * 100:+.2f}%"
+
+
+def _e(v) -> str:
+    """HTML-escape anything interpolated into markup.
+
+    The original interpolated company names, targets and mech strings straight
+    into HTML (one of them into a `style='...'` attribute, where a stray quote
+    breaks the tag). Nothing here is attacker-controlled today, but the tables
+    are one copy-paste away from carrying a yfinance company name.
+    """
+    return html.escape(str(v), quote=True)
+
+
+# =============================================================================
 # UI
-# ═══════════════════════════════════════════════════════════════════════════════
-def build_row(stock, price, prev, zone, near_pct, ath, fund=None) -> str:
-    color = ZONE_COLORS[zone]
-    name = display_name(stock, zone)
-    if zone == ZONE_BUY and stock.get("buy_lo") is not None and price < float(stock["buy_lo"]):
-        status = "🟢 IN BUY RANGE (below — getting lucky)"
-    elif zone == ZONE_BUY:
-        status = "🟢 IN BUY RANGE"
-    elif zone == ZONE_NEAR:
-        status = f"⚪ WITHIN {near_pct:.0f}% OF BUY TOP"
-    elif zone == ZONE_TRIM:
-        status = "🔴 TRIM / SELL ZONE"
-    elif zone == ZONE_NODATA:
-        status = "NO DATA"
+# =============================================================================
+TABLE_CSS = """
+<style>
+table.pm { width:100%; border-collapse:collapse; font-size:15.5px; }
+table.pm th { padding:4px 8px; color:#78909C; text-align:left;
+              border-bottom:1px solid #37474F; }
+table.pm td { padding:5px 8px; color:#B0BEC5; }
+table.pm td.tk, table.pm th.tk { font-family:monospace; }
+table.pm td.nm, table.pm td.st { font-weight:600; }
+table.pm tr { border-bottom:1px solid #263238; }
+table.pm.tight { font-size:14px; }
+table.pm.tight td { padding:4px 6px; }
+.z-buy{color:#00E676}.z-near{color:#FFFFFF}.z-trim{color:#FF5252}
+.z-wait{color:#9E9E9E}.z-nodata{color:#616161}
+.c-ok{color:#00E676}.c-warn{color:#FFD54F}.c-bad{color:#FF5252}
+.c-mut{color:#546E7A}.c-dim{color:#8D6E63}
+</style>
+"""
+
+
+def _cell(text, cls: str = "") -> str:
+    return f"<td class='{cls}'>{text}</td>" if cls else f"<td>{text}</td>"
+
+
+def status_text(stock: dict, zone: str, price: Optional[float], near_pct: float) -> str:
+    lo = _num(stock.get("buy_lo"))
+    if zone == ZONE_BUY:
+        if lo is not None and price is not None and price < lo:
+            return "🟢 IN BUY RANGE (below — getting lucky)"
+        return "🟢 IN BUY RANGE"
+    if zone == ZONE_NEAR:
+        return f"⚪ WITHIN {near_pct:.0f}% OF BUY TOP"
+    if zone == ZONE_TRIM:
+        return "🔴 TRIM / SELL ZONE"
+    if zone == ZONE_NODATA:
+        return "NO DATA"
+    return "wait"
+
+
+# --- precomputed static cells -------------------------------------------------
+# Five of the thirteen cells (ticker, company, buying range, trim, target) and
+# both status variants depend only on (ticker, zone, near_pct) — they never
+# change between reruns. Building them once removes ~400 `html.escape` calls and
+# ~500 function calls per render. Measured: escaping every cell inline cost more
+# than the string formatting it protected.
+_STATIC_CELLS: dict[tuple, tuple] = {}
+
+
+def static_cells(stock: dict, zone: str, near_pct: float) -> tuple:
+    """(ticker, name, status_plain, status_lucky, range, trim, target) as HTML.
+
+    Memoised on (ticker, zone, near_pct). `status_lucky` is the
+    "below — getting lucky" variant, chosen at render time from the price.
+    """
+    key = (stock["t"], zone, near_pct)
+    got = _STATIC_CELLS.get(key)
+    if got is not None:
+        return got
+    cls = ZONE_CLASSES.get(zone, "z-wait")
+
+    mech, trim = stock.get("mech"), _num(stock.get("trim"))
+    trim_txt = DASH if trim is None else fmt_money(trim) + (
+        f" <span class='c-mut' style='font-size:13px;'>({_e(mech)})</span>" if mech else "")
+
+    got = (
+        _cell(_e(stock["t"]), "tk"),
+        _cell(_e(display_name(stock, zone)), f"nm {cls}"),
+        _cell(_e(status_text(stock, zone, None, near_pct)), f"st {cls}"),
+        _cell(_e(status_text(stock, zone, -1e18, near_pct)), f"st {cls}"),
+        _cell(_e(fmt_range(stock))),
+        _cell(trim_txt),
+        _cell(_e(stock.get("target") or DASH)),
+    )
+    _STATIC_CELLS[key] = got
+    return got
+
+
+def build_row(stock, price, prev, zone, near_pct, ath, metrics: Optional[dict] = None) -> str:
+    """One monitor row. `metrics` is the precomputed derived dict; passing None
+    renders the '—' path.
+
+    Signature change: the last argument used to be the raw `.info` dict, which
+    forced every row to recompute EGF and FScore. It is now the precomputed
+    metrics dict, produced once per ticker per day.
+    """
+    m = metrics or {}
+    cls = ZONE_CLASSES.get(zone, "z-wait")
+    tk, name, st_plain, st_lucky, rng, trim, target = static_cells(stock, zone, near_pct)
+
+    below_lo = False
+    if zone == ZONE_BUY and price is not None:
+        lo = _num(stock.get("buy_lo"))
+        below_lo = lo is not None and price < lo
+
+    egf = m.get("egf")
+    if egf is None:
+        egf_cell = _cell(DASH, "c-mut")
     else:
-        status = "wait"
-    day = "—" if (price is None or not prev) else f"{(price / prev - 1) * 100:+.2f}%"
-    mech = stock.get("mech")
-    trim_txt = "—" if stock.get("trim") is None else fmt_money(stock["trim"]) + (f" <span style='color:#546E7A;font-size:13px;'>({mech})</span>" if mech else "")
-    fund = fund or {}
-    fwd_pe = fund.get("forwardPE")
-    peg = fund.get("trailingPegRatio") or fund.get("pegRatio")
-    egf = egf_proxy(fund)
-    score = fundamentals_score(fund)
-    egf_color = "#00E676" if (egf or 0) > 0 else ("#FF5252" if egf is not None else "#546E7A")
+        egf_cell = _cell(fmt_g(egf), "c-ok" if egf > 0 else "c-bad")
+
+    score = m.get("score")
     if score is None:
-        score_txt, score_color = "—", "#546E7A"
+        score_cell = _cell(DASH, "c-mut")
     else:
-        score_txt = f"{score}/10"
-        score_color = "#00E676" if score >= 7 else ("#FFD54F" if score >= 4 else "#FF5252")
+        score_cell = _cell(f"{score}/10", f"st {'c-ok' if score >= 7 else ('c-warn' if score >= 4 else 'c-bad')}")
+
     return (
-        f"<tr style='border-bottom:1px solid #263238;'>"
-        f"<td style='padding:5px 8px; color:#B0BEC5; font-family:monospace;'>{stock['t']}</td>"
-        f"<td style='padding:5px 8px; color:{color}; font-weight:600;'>{name}</td>"
-        f"<td style='padding:5px 8px; color:{color};'>{fmt_money(price) if price is not None else '—'}</td>"
-        f"<td style='padding:5px 8px; color:#B0BEC5;'>{day}</td>"
-        f"<td style='padding:5px 8px; color:{color}; font-weight:600;'>{status}</td>"
-        f"<td style='padding:5px 8px; color:#B0BEC5;'>{fmt_range(stock)}</td>"
-        f"<td style='padding:5px 8px; color:#B0BEC5;'>{trim_txt}</td>"
-        f"<td style='padding:5px 8px; color:#B0BEC5;'>{stock.get('target') or '—'}</td>"
-        f"<td style='padding:5px 8px; color:#B0BEC5;'>{fmt_n(fwd_pe)}</td>"
-        f"<td style='padding:5px 8px; color:#B0BEC5;'>{fmt_n(peg)}</td>"
-        f"<td style='padding:5px 8px; color:{egf_color};'>{fmt_g(egf / 100.0) if egf is not None else '—'}</td>"
-        f"<td style='padding:5px 8px; color:{score_color}; font-weight:600;'>{score_txt}</td>"
-        f"<td style='padding:5px 8px; color:#B0BEC5;'>{fmt_ath(price, ath)}</td>"
-        f"</tr>"
+        "<tr>" + tk + name
+        + f"<td class='{cls}'>{fmt_money(price)}</td>"
+        + f"<td>{fmt_pct_day(price, prev)}</td>"
+        + (st_lucky if below_lo else st_plain)
+        + rng + trim + target
+        + f"<td>{fmt_n(m.get('fwd_pe'))}</td>"
+        + f"<td>{fmt_n(m.get('peg'))}</td>"
+        + egf_cell + score_cell
+        + f"<td>{fmt_ath(price, ath)}</td></tr>"
     )
 
 
 def build_static_row(stock) -> str:
     """Non-US / unmonitored row (e.g. BESI) — static info, gray."""
-    return (
-        f"<tr style='border-bottom:1px solid #263238;'>"
-        f"<td style='padding:5px 8px; color:#8D6E63; font-family:monospace;'>{stock['t']}</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63; font-weight:600;'>{stock['name']}</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
-        f"<td style='padding:5px 8px; color:#616161;'>NOT MONITORED ({stock.get('why_static', 'non-US')})</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>{fmt_range(stock)}</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>{stock.get('target') or '—'}</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
-        f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
-        f"</tr>"
+    # Column order must match table_html(): ticker, name, price, day%, status,
+    # range, trim, target, then the five metric columns. (An earlier draft had
+    # 3 blanks before the status and 4 after the target — the parity suite
+    # caught the resulting one-column misalignment.)
+    cells = (
+        [_cell(_e(stock["t"]), "tk c-dim"), _cell(_e(stock["name"]), "nm c-dim")]
+        + [_cell(DASH, "c-dim")] * 2                      # price, day %
+        + [_cell("NOT MONITORED (non-US)", "z-nodata")]   # status
+        + [_cell(_e(fmt_range(stock)), "c-dim")]          # buying range
+        + [_cell(DASH, "c-dim")]                          # trim
+        + [_cell(_e(stock.get("target") or DASH), "c-dim")]
+        + [_cell(DASH, "c-dim")] * 5                      # fwd pe .. % from ATH
     )
+    return "<tr>" + "".join(cells) + "</tr>"
 
 
-def table_html(rows, target_label="12m Target") -> str:
-    return (
-        "<table style='width:100%; border-collapse:collapse; font-size:15.5px;'>"
-        "<tr style='color:#78909C; text-align:left; border-bottom:1px solid #37474F;'>"
-        "<th style='padding:4px 8px;'>Ticker</th><th>Company</th><th>Price</th>"
-        "<th>Day %</th><th>Status</th><th>Buying Range</th><th>Trim ≥</th>"
-        f"<th>{target_label}</th><th>Fwd P/E</th><th>PEG</th><th>EGF proxy</th>"
-        "<th>FScore</th><th>% from ATH</th></tr>"
-        + "".join(rows) + "</table>"
-    )
+def table_html(rows, target_label: str = "12m Target") -> str:
+    heads = ["Ticker", "Company", "Price", "Day %", "Status", "Buying Range", "Trim ≥",
+             target_label, "Fwd P/E", "PEG", "EGF proxy", "FScore", "% from ATH"]
+    th = "".join(f"<th{' class=tk' if i == 0 else ''}>{_e(h)}</th>"
+                 for i, h in enumerate(heads))
+    return (TABLE_CSS + "<table class='pm'><tr>" + th + "</tr>"
+            + "".join(rows) + "</table>")
 
 
 def render_zone_strip(zone_map, quotes, near_pct) -> None:
-    """Compact header: the SYMBOLS in each zone (small font) instead of big
-    number metrics — keeps the top of the page light."""
+    """Compact header: the SYMBOLS in each zone (small font)."""
     groups = [
-        ("🟢 IN BUY RANGE", ZONE_BUY, ZONE_COLORS[ZONE_BUY]),
-        (f"⚪ WITHIN {near_pct:.0f}% OF BUY TOP", ZONE_NEAR, ZONE_COLORS[ZONE_NEAR]),
-        ("🔴 TRIM / SELL ZONE", ZONE_TRIM, ZONE_COLORS[ZONE_TRIM]),
-        ("NO DATA", ZONE_NODATA, ZONE_COLORS[ZONE_NODATA]),
+        ("🟢 IN BUY RANGE", ZONE_BUY, ZONE_CLASSES[ZONE_BUY]),
+        (f"⚪ WITHIN {near_pct:.0f}% OF BUY TOP", ZONE_NEAR, ZONE_CLASSES[ZONE_NEAR]),
+        ("🔴 TRIM / SELL ZONE", ZONE_TRIM, ZONE_CLASSES[ZONE_TRIM]),
+        ("NO DATA", ZONE_NODATA, ZONE_CLASSES[ZONE_NODATA]),
     ]
     lines = []
-    for label, zone, color in groups:
+    for label, zone, cls in groups:
         tickers = sorted(t for t, z in zone_map.items() if z == zone)
         if not tickers:
             continue
         lines.append(
             f"<div style='font-size:14px; line-height:1.55; margin:1px 0;'>"
-            f"<span style='font-weight:600;'>{label} <span style='color:#78909C;'>({len(tickers)})</span>:</span> "
-            f"<span style='color:{color}; font-family:monospace;'>{' '.join(tickers)}</span></div>"
-        )
-    latest = max((q[2] for q in quotes.values() if q), default=None)
+            f"<span style='font-weight:600;'>{_e(label)} "
+            f"<span class='c-mut'>({len(tickers)})</span>:</span> "
+            f"<span class='{cls}' style='font-family:monospace;'>"
+            f"{_e(' '.join(tickers))}</span></div>")
+    latest = None
+    for q in (quotes or {}).values():
+        if q and q[2] is not None and (latest is None or q[2] > latest):
+            latest = q[2]
     if latest is not None:
-        lines.append(f"<div style='font-size:13px; color:#546E7A; margin-top:2px;'>"
-                     f"quotes as of {latest.strftime('%d %b %H:%M')} ET</div>")
-    st.markdown("<div style='border:1px solid #263238; border-radius:8px; padding:8px 12px; "
-                "margin-bottom:12px;'>" + "".join(lines) + "</div>", unsafe_allow_html=True)
+        lines.append(f"<div class='c-mut' style='font-size:13px; margin-top:2px;'>"
+                     f"quotes as of {_e(latest.strftime('%d %b %H:%M'))} ET</div>")
+    st.markdown(TABLE_CSS +
+                "<div style='border:1px solid #263238; border-radius:8px; padding:8px 12px; "
+                "margin-bottom:12px;'>" + "".join(lines) + "</div>",
+                unsafe_allow_html=True)
 
 
-def render_fundamentals_tab(stocks_list, quotes, zones, funds,
-                             wacc: float = 0.095, terminal_g: float = 0.025):
-    """Full metric set from yfinance (one row per monitored ticker) + the
-    computed DCF estimate and Yahoo analyst recommendation / mean target.
-    Column explanations and the FScore methodology sit at the bottom."""
+def render_fundamentals_tab(stocks_list, quotes, zones, funds, metrics_by_ticker,
+                            wacc: float = 0.095, terminal_g: float = 0.025):
+    """Full metric set + DCF + analyst view."""
     headers = ["Ticker", "Company", "Price", "Fwd P/E", "Trail P/E", "PEG",
                "EGF proxy", "EPS YoY", "Rev growth", "Gross M", "Oper M",
-               "Profit M", "ROE", "P/B", "P/S", "D/E", "Cash", "Debt", "FCF",
-               "Mkt Cap", "FScore", "DCF/sh", "DCF upside", "Analyst Rec",
+               "Profit M", "ROE", "P/B", "P/S", "Debt ratio", "Cash", "Debt",
+               "FCF", "Mkt Cap", "FScore", "DCF/sh", "DCF upside", "Analyst Rec",
                "Analyst Tgt", "Tgt upside"]
-    head = "".join(f"<th style='padding:4px 6px;'>{h}</th>" for h in headers)
+    head = "".join(f"<th{' class=tk' if i == 0 else ''}>{_e(h)}</th>"
+                   for i, h in enumerate(headers))
+
     rows = []
     for s in stocks_list:
-        q = quotes.get(s["t"])
+        t = s["t"]
+        q = (quotes or {}).get(t)
         price = q[0] if q else None
-        zone = zones.get(s["t"], ZONE_WAIT)
-        f = funds.get(s["t"]) or {}
-        color = ZONE_COLORS[zone]
-        score = fundamentals_score(f)
-        score_html = "—" if score is None else (
-            f"<span style='color:{'#00E676' if score >= 7 else ('#FFD54F' if score >= 4 else '#FF5252')};'>"
+        zone = zones.get(t, ZONE_WAIT)
+        m = metrics_by_ticker.get(t) or {}
+        cls = ZONE_CLASSES.get(zone, "z-wait")
+
+        score = m.get("score")
+        score_html = DASH if score is None else (
+            f"<span class='{'c-ok' if score >= 7 else ('c-warn' if score >= 4 else 'c-bad')}'>"
             f"{score}/10</span>")
-        egf = egf_proxy(f)
-        egf_html = "—" if egf is None else (
-            f"<span style='color:{'#00E676' if egf > 0 else '#FF5252'};'>{egf:+.1f}%</span>")
-        de = "—" if not (f.get("totalDebt") and f.get("totalCash")) else \
-            (f"{float(f['totalDebt']) / max(float(f['totalCash']), 1.0):.1f}" if f.get("totalCash") else "—")
-        dcf = dcf_fair_value(f, wacc, terminal_g)
+        egf = m.get("egf")
+        egf_html = DASH if egf is None else (
+            f"<span class='{'c-ok' if egf > 0 else 'c-bad'}'>{egf * 100:+.1f}%</span>")
+
+        ratio, basis = debt_ratio(funds.get(t) or {})
+        de = DASH if ratio is None else f"{ratio:.1f}"
+
+        dcf = dcf_fair_value(funds.get(t) or {}, wacc, terminal_g)
         if dcf is None or price is None:
-            dcf_html, dcf_up_html = "—", "—"
+            dcf_html, dcf_up_html = DASH, DASH
         else:
             up = dcf / price - 1.0
-            col = "#00E676" if up > 0.05 else ("#FF5252" if up < -0.05 else "#FFD54F")
-            dcf_html = fmt_money(dcf)
-            dcf_up_html = f"<span style='color:{col};'>{up * 100:+.1f}%</span>"
-        tgt = f.get("targetMeanPrice")
-        rec_html, _rc = fmt_recommendation(f.get("recommendationKey"))
-        rec_html = f"<span style='color:{_rc};'>{rec_html}</span>"
-        if tgt and price:
-            tgt_html = fmt_money(float(tgt))
-        else:
-            tgt_html = "—"
+            col = "c-ok" if up > 0.05 else ("c-bad" if up < -0.05 else "c-warn")
+            dcf_html, dcf_up_html = fmt_money(dcf), f"<span class='{col}'>{up * 100:+.1f}%</span>"
+
+        rec, rec_color = fmt_recommendation((funds.get(t) or {}).get("recommendationKey"))
+        rec_html = f"<span class='{'c-mut' if rec == DASH else ''}' style='color:{rec_color};'>{_e(rec)}</span>"
+        tgt = m.get("target")
+        tgt_html = fmt_money(tgt) if (tgt and price) else DASH
+        tgt_up = f"{(tgt / price - 1.0) * 100:+.1f}%" if (tgt and price) else DASH
+
         cells = [
-            s["t"], display_name(s, zone), fmt_money(price) if price is not None else "—",
-            fmt_n(f.get("forwardPE")), fmt_n(f.get("trailingPE")),
-            fmt_n(f.get("trailingPegRatio") or f.get("pegRatio")),
-            egf_html, fmt_g(f.get("earningsGrowth")), fmt_g(f.get("revenueGrowth")),
-            fmt_g(f.get("grossMargins")), fmt_g(f.get("operatingMargins")),
-            fmt_g(f.get("profitMargins")), fmt_g(f.get("returnOnEquity")),
-            fmt_n(f.get("priceToBook")), fmt_n(f.get("priceToSalesTrailing12Months")),
-            de, fmt_usd_b(f.get("totalCash")), fmt_usd_b(f.get("totalDebt")),
-            fmt_usd_b(f.get("freeCashflow")), fmt_usd_b(f.get("marketCap")),
-            score_html, dcf_html, dcf_up_html, rec_html, tgt_html,
-            (f"{(float(tgt) / price - 1.0) * 100:+.1f}%" if (tgt and price) else "—"),
+            _e(t), _e(display_name(s, zone)), fmt_money(price),
+            fmt_n(m.get("fwd_pe")), fmt_n(m.get("ttm_pe")), fmt_n(m.get("peg")),
+            egf_html, fmt_g(m.get("eps_yoy")), fmt_g(m.get("rev_g")),
+            fmt_g(m.get("gross_m")), fmt_g(m.get("oper_m")), fmt_g(m.get("profit_m")),
+            fmt_g(m.get("roe")), fmt_n(m.get("pb")), fmt_n(m.get("ps")),
+            de, fmt_usd_b(m.get("cash")), fmt_usd_b(m.get("debt")),
+            fmt_usd_b(m.get("fcf")), fmt_usd_b(m.get("mcap")),
+            score_html, dcf_html, dcf_up_html, rec_html, tgt_html, tgt_up,
         ]
         tds = "".join(
-            f"<td style='padding:4px 6px; font-size:14px; color:{'#B0BEC5'};'>{c}</td>"
-            if i not in (1,) else
-            f"<td style='padding:4px 6px; font-size:14px; color:{color}; font-weight:600;'>{c}</td>"
+            _cell(c, f"{cls} nm" if i == 1 else ("tk" if i == 0 else ""))
             for i, c in enumerate(cells))
-        rows.append(f"<tr style='border-bottom:1px solid #263238;'>{tds}</tr>")
-    st.markdown(
-        "<table style='width:100%; border-collapse:collapse; font-size:14px;'>"
-        f"<tr style='color:#78909C; text-align:left; border-bottom:1px solid #37474F;'>{head}</tr>"
-        + "".join(rows) + "</table>", unsafe_allow_html=True)
+        rows.append(f"<tr>{tds}</tr>")
 
-    # ── BOTTOM: column explanations + FScore methodology (per user request) ──
+    st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + head + "</tr>"
+                + "".join(rows) + "</table>", unsafe_allow_html=True)
+
+    # ── column explanations + FScore methodology ────────────────────────────
     st.markdown("---")
     st.subheader("📚 What the columns mean")
     expl = [
@@ -833,44 +1582,43 @@ def render_fundamentals_tab(stocks_list, quotes, zones, funds,
         ("Trail P/E", "price ÷ last 4 quarters' EPS — the multiple for CURRENT earnings."),
         ("PEG", "P/E ÷ growth rate — under ~1 cheap for its growth, over ~2 expensive (rule of thumb)."),
         ("EGF proxy", "forward vs trailing EPS growth (fwdEps ÷ trailEps − 1). Proxy for Walayat's EGF; "
-                       "his exact figure uses next-quarter estimates yfinance doesn't expose. Green = growing."),
+                      "his exact figure uses next-quarter estimates yfinance doesn't expose. Green = growing."),
         ("EPS YoY", "last quarter's earnings vs the same quarter a year ago."),
         ("Rev growth", "last quarter's revenue vs a year ago."),
         ("Gross / Oper / Profit M", "profit left at each stage of the income statement, as % of revenue."),
         ("ROE", "return on equity — how efficiently shareholder capital is put to work."),
         ("P/B", "price ÷ book value. P/S: price ÷ trailing 12m revenue."),
-        ("D/E", "total debt ÷ total cash (1.0 = debt equals cash). Cash / Debt / FCF in $B."),
+        ("Debt ratio", f"total debt ÷ total equity where Yahoo reports equity, else ÷ total cash. "
+                       f"The header shows which basis each figure uses (D/E vs D/C). Cash / Debt / FCF in $B."),
         ("Mkt Cap", "market value of the whole company."),
-        ("DCF/sh", "COMPUTED fair-value estimate: FCF × (1+g) ÷ (WACC − g) + cash − debt, per share. "
-                    "g = growth capped at 6%; WACC & terminal growth are the sidebar sliders. "
-                    "n/a when FCF ≤ 0. A rough anchor, NOT a price target."),
+        ("DCF/sh", "COMPUTED fair-value estimate, TWO-STAGE: 5 years of explicit growth at the "
+                    "reported rate (capped 25%), a 5-year linear fade to the terminal rate, then a "
+                    "perpetuity; + cash − debt, per share. n/a when FCF ≤ 0 or the discount margin "
+                    "is not positive. A rough anchor, NOT a price target."),
         ("Analyst Rec / Tgt", "Yahoo's aggregated analyst rating and mean 12-month price target "
-                               "with implied upside vs the current price."),
+                              "with implied upside vs the current price."),
     ]
-    st.markdown(
-        "<table style='width:100%; border-collapse:collapse; font-size:13px;'>"
-        + "".join(
-            f"<tr style='border-bottom:1px solid #263238;'>"
-            f"<td style='padding:4px 8px; color:#90CAF9; font-weight:600; width:170px;'>{k}</td>"
-            f"<td style='padding:4px 8px; color:#B0BEC5;'>{v}</td></tr>" for k, v in expl)
-        + "</table>", unsafe_allow_html=True)
+    st.markdown(TABLE_CSS +
+                "<table class='pm tight'>" + "".join(
+                    f"<tr><td style='width:170px;'><span style='color:#90CAF9;font-weight:600;'>"
+                    f"{_e(k)}</span></td><td>{_e(v)}</td></tr>" for k, v in expl)
+                + "</table>", unsafe_allow_html=True)
 
     st.subheader("⭐ FScore — the 0-10 fundamentals score, explained")
     st.markdown(
         "Walayat maintains a time-consuming hand-built 0-10 Fundamentals column. FScore is a "
         "transparent, automatable stand-in built from the same ideas (PE, EPS, revenue, cash "
         "flow, ROE). **+1 point for each check passed; missing data counts as a FAIL, so the "
-        "score skews conservative:**"
-    )
+        "score skews conservative:**")
     checks = [
-        "1. Forward EPS growth > 0 — earnings are growing into the multiple (the EGF idea).",
-        "2. EPS YoY > 0 — the last quarter actually earned more than a year ago.",
-        "3. Revenue growth > 0 — the top line is still expanding.",
-        "4. Profit margin > 10% — the business keeps a healthy slice of revenue.",
-        "5. ROE > 15% — capital is being put to work efficiently.",
-        "6. Forward P/E < Trailing P/E — the multiple is SHRINKING as earnings grow (his 'gets cheaper over time').",
-        "7. Total cash > total debt — balance-sheet safety.",
-        "8. Free cash flow > 0 — the business actually generates cash.",
+        "1. EGF proxy > 0 — forward EPS above trailing EPS.",
+        "2. EPS YoY > 0 — last quarter's earnings beat the year-ago quarter.",
+        "3. Revenue growth > 0.",
+        "4. Profit margin > 10%.",
+        "5. ROE > 15%.",
+        "6. Forward P/E < trailing P/E — earnings rising into the multiple.",
+        "7. Cash > debt — balance-sheet cushion.",
+        "8. Free cash flow > 0.",
         "9. Gross margin > 30% — pricing power / quality of the business.",
         "10. PEG between 0 and 2 — valuation not detached from growth.",
     ]
@@ -879,13 +1627,11 @@ def render_fundamentals_tab(stocks_list, quotes, zones, funds,
     st.caption(
         "Reading it: 8-10 green = strong fundamentals (his 'epic' territory); 4-7 amber = mixed, "
         "check the individual columns; 0-3 red = weak — be extra demanding on the buying range. "
-        "Fundamentals refresh once per day."
-    )
+        "Fundamentals refresh once per day.")
 
 
 def inject_theme() -> None:
-    """[THEME] main window = deep blue, sidebar = deep plum (user preference).
-    Injected as CSS so the app stays a single file with no config.toml."""
+    """[THEME] main window = deep blue, sidebar = deep plum (user preference)."""
     st.markdown(
         """
         <style>
@@ -906,20 +1652,30 @@ def render_rules_tab():
     st.markdown(
         f"<div style='border:2px solid #FFB300; border-radius:10px; padding:12px 16px; "
         f"background:rgba(255,179,0,0.07); font-size:16px; color:#FFD54F; font-weight:600;'>"
-        f"🔑 {MANTRA}</div><br>", unsafe_allow_html=True)
+        f"🔑 {_e(MANTRA)}</div><br>", unsafe_allow_html=True)
     st.markdown("**The 6 Real Secrets for Successful Trading**")
     for s in REAL_SECRETS:
         st.markdown(f"- {s}")
     st.divider()
     col1, col2 = st.columns(2)
     for i, (title, bullets) in enumerate(GUIDE_GROUPS):
-        with col1 if i % 2 == 0 else col2:
+        with (col1 if i % 2 == 0 else col2):
             st.markdown(f"**{title}**")
             for b in bullets:
                 st.markdown(f"- {b}")
             st.markdown("")
     st.caption("Distilled from the 'Real Secret' (Jan 2019) and 'Investing Guide' tabs of the "
                "AI Tech Stocks Portfolio spreadsheet — originals there for the full text.")
+
+
+# =============================================================================
+# APP
+# =============================================================================
+@st.cache_resource
+def _store() -> DataStore:
+    """One store per server process. `cache_resource` (not `cache_data`) so the
+    background thread pool and its in-flight futures survive reruns."""
+    return DataStore()
 
 
 def main():
@@ -935,11 +1691,10 @@ def main():
     slot = current_snapshot_ts(now)
     nxt = next_snapshot_ts(now)
 
-    # Wake exactly at the next snapshot (09:30 / 12:00 / 16:00 ET, skipping
-    # weekends). Between snapshots nothing refetches.
     try:
         from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=ms_until_next_snapshot(time.time() * 1000.0),
+
+        st_autorefresh(interval=ms_until_next_snapshot(now),
                        key=f"snapshot_{slot.strftime('%Y%m%d_%H%M')}")
     except ImportError:
         st.sidebar.caption("⚠️ streamlit-autorefresh not installed — data refreshes when the app re-opens.")
@@ -948,27 +1703,12 @@ def main():
     st.caption(
         "Accumulate the dumps, distribute the pumps  •  GREEN/ALL CAPS = in buying range (or below)  •  "
         "WHITE = within 10% of buy top  •  RED/ALL CAPS = trim zone  •  Levels: 26 Aug article › author "
-        "comments › Trade Wind › portfolio sheet 25 Aug › briefs"
-    )
+        "comments › Trade Wind › portfolio sheet 25 Aug › briefs")
 
-    # per-browser-session nonce: first render of a new session forces ONE
-    # fresh download; reruns reuse the snapshot cache.
-    if "_session_nonce" not in st.session_state:
-        st.session_state["_session_nonce"] = time.time()
-    quotes, fetched_at = _load_slot(slot.strftime("%Y-%m-%d_%H:%M"),
-                                    st.session_state["_session_nonce"])
-    aths = _load_aths(now.strftime("%Y-%m-%d"))
-    funds = _load_fundamentals(now.strftime("%Y-%m-%d"))
+    store = _store()
 
-    market_open = now.weekday() < 5 and 9 * 60 + 30 <= now.hour * 60 + now.minute < 16 * 60
-    if market_open:
-        st.success(f"🔴 Snapshot {slot.strftime('%H:%M')} ET — prices update 09:30 / 12:00 / 16:00 ET; "
-                   f"next update {nxt.strftime('%a %H:%M')} ET.")
-    else:
-        st.info(f"🌙 MARKET CLOSED — latest snapshot {slot.strftime('%a %d %b %H:%M')} ET. Prices "
-                f"update only at 09:30 / 12:00 / 16:00 ET on trading days; re-open the app anytime "
-                f"to refresh.")
-
+    # Sidebar first: refresh is a user action, and it must be able to clear the
+    # disk cache before any load happens.
     with st.sidebar:
         st.header("⚙️ Monitor")
         near_pct = st.slider("Near-zone % above buy top", 1.0, 25.0, NEAR_PCT_DEFAULT, 0.5)
@@ -980,57 +1720,91 @@ def main():
         tg_pct = st.slider("Terminal growth (%)", 1.0, 4.0, 2.5, 0.05,
                            help="Long-run perpetual growth; must stay well below the WACC.")
         st.divider()
+        if st.button("🔄 Refresh data now"):
+            for p in store.cache.root.glob("*.json"):
+                if p.name != "ath-state.json":
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+            store.states.clear()
+            st.rerun()
         st.caption(
-            "Data: Yahoo Finance (yfinance), one batched download per snapshot. Levels are Nadeem "
-            "Walayat's published numbers. Monitor only — no orders. Not investment advice."
-        )
+            "Data: Yahoo Finance (yfinance). Levels are Nadeem Walayat's published numbers. "
+            "Nothing is simulated or defaulted: a missing figure is an em-dash and is "
+            "counted above, never filled in. Monitor only — no orders. Not investment advice.")
 
-    monitored = ([s for s in BRIGADE if not s.get("static")] +
-                 [s for s in STOCKS if not s.get("static")])
-    quotes = {s["t"]: quotes.get(s["t"]) for s in monitored}
-    zones = {s["t"]: zone_of(quotes[s["t"]][0] if quotes[s["t"]] else None, s, near_pct)
-             for s in monitored}
+    slot_key = slot.strftime("%Y-%m-%d_%H-%M")
+    day_key = now.strftime("%Y-%m-%d")
+
+    # Kick off refreshes in the background, then render from whatever is cached.
+    store.prefetch(slot_key, day_key)
+
+    quotes = store.quotes(slot_key)
+    aths = store.aths()
+    funds, metrics_map = store.fundamentals(day_key)
+
+    market_open = _is_trading_day(now) and 9 * 60 + 30 <= now.hour * 60 + now.minute < 16 * 60
+    if market_open:
+        st.success(f"🔴 Snapshot {slot.strftime('%H:%M')} ET — prices update 09:30 / 12:00 / 16:00 ET; "
+                   f"next update {nxt.strftime('%a %H:%M')} ET.")
+    else:
+        st.info(f"🌙 MARKET CLOSED — latest snapshot {slot.strftime('%a %d %b %H:%M')} ET. Prices "
+                f"update only at 09:30 / 12:00 / 16:00 ET on trading days; re-open the app anytime "
+                f"to refresh.")
+
+    prices = {t: (q[0] if q else None) for t, q in quotes.items()}
+    zones = compute_zones(prices, near_pct)
+
+    # Failures are data, not exceptions — show them instead of silent em-dashes.
+    problems = validate_levels()
+    missing = sorted(t for t, q in quotes.items() if not q)
+    status_parts = [store.status_line()]
+    if missing:
+        status_parts.append(f"{len(missing)} ticker(s) with no quote: {', '.join(missing)}")
+    st.caption("  •  ".join(p for p in status_parts if p))
+    if problems:
+        with st.expander(f"⚠️ {len(problems)} level-table data issue(s) (click to review)"):
+            for p in problems:
+                st.markdown(f"- {_e(p)}")
 
     tab_monitor, tab_fund, tab_rules = st.tabs(
         ["📈 Monitor", "🔬 Fundamentals", "📖 Rules to Remember"])
 
     with tab_monitor:
-        # compact symbol strip (no big number metrics)
         render_zone_strip(zones, quotes, near_pct)
 
-        # ── ⭐ 10X BRIGADE — hard-coded, always top & center ───────────────────
+        # ── ⭐ 10X BRIGADE ──────────────────────────────────────────────────
         rows = []
         for s in BRIGADE:
             if s.get("static"):
                 rows.append(build_static_row(s))
                 continue
-            q = quotes[s["t"]]
+            q = quotes.get(s["t"])
             price, prev = (q[0], q[1]) if q else (None, None)
-            rows.append(build_row(s, price, prev, zones[s["t"]], near_pct,
-                                  aths.get(s["t"]), funds.get(s["t"])))
-        box = (
+            rows.append(build_row(s, price, prev, zones.get(s["t"], ZONE_WAIT), near_pct,
+                                  aths.get(s["t"]), metrics_map.get(s["t"])))
+        st.markdown(
             "<div style='border:2px solid #FFB300; border-radius:10px; "
             "padding:10px 14px 12px; background:rgba(255,179,0,0.06); margin-bottom:16px;'>"
             "<h3 style='color:#FFB300; margin:4px 0 2px;'>⭐ 10X BRIGADE</h3>"
-            f"<div style='color:#9E9E9E; font-size:12px; margin-bottom:6px;'>{BRIGADE_NOTE}</div>"
-            + table_html(rows, target_label="10Yr Target") + "</div>"
-        )
-        st.markdown(box, unsafe_allow_html=True)
+            f"<div style='color:#9E9E9E; font-size:12px; margin-bottom:6px;'>{_e(BRIGADE_NOTE)}</div>"
+            + table_html(rows, target_label="10Yr Target") + "</div>",
+            unsafe_allow_html=True)
 
-        # ── main list: one table, latest-article stocks first ─────────────────
-        stocks = STOCKS
+        # ── main list ───────────────────────────────────────────────────────
+        # PORTFOLIO, not STOCKS: the raw table still contains the delisted
+        # names, and iterating it here would render them as "NO DATA" rows.
+        stocks = PORTFOLIO
         if only_actionable:
-            stocks = [s for s in stocks if zones.get(s["t"]) in (ZONE_BUY, ZONE_NEAR, ZONE_TRIM)]
+            stocks = [s for s in stocks
+                      if zones.get(s["t"]) in (ZONE_BUY, ZONE_NEAR, ZONE_TRIM)]
         st.subheader("Portfolio")
-        rows = []
-        for s in stocks:
-            if s.get("static"):
-                rows.append(build_static_row(s))
-                continue
-            q = quotes[s["t"]]
-            price, prev = (q[0], q[1]) if q else (None, None)
-            rows.append(build_row(s, price, prev, zones[s["t"]], near_pct,
-                                  aths.get(s["t"]), funds.get(s["t"])))
+        rows = [build_row(s, (quotes.get(s["t"]) or (None, None, None))[0],
+                          (quotes.get(s["t"]) or (None, None, None))[1],
+                          zones.get(s["t"], ZONE_WAIT), near_pct,
+                          aths.get(s["t"]), metrics_map.get(s["t"]))
+                for s in stocks]
         st.markdown(table_html(rows), unsafe_allow_html=True)
 
         with st.expander("ℹ️ Sources, exclusions & crypto reference"):
@@ -1042,28 +1816,28 @@ def main():
                 "**Portfolio CSV (25 Aug)** — buying ranges + trim mechanisms.  \n"
                 "**Stocks Briefs** — OXY ($40–74) / SLB ($32–60) ranges, FSLR sub-$200.  \n"
                 "**Excluded** — non-US listings (BESI shown static, SMSN.L, SMT.L, WTAI.L/INTL.L, "
-                "RBTX.L, UKW.L, BDEV.L, PRX.NV) and dead rows (MED, APM, CRSR, U, BPMC, BDSI)."
-            )
+                "RBTX.L, UKW.L, BDEV.L, PRX.NV) and dead rows (MED, APM, CRSR, U, BPMC, BDSI).")
             st.markdown(CRYPTO_REFERENCE)
-            failures = {t: "no data" for t, q in quotes.items() if not q}
-            if failures:
-                st.caption("No data (check ticker on Yahoo Finance): " + ", ".join(sorted(failures)))
+            if missing:
+                st.caption("No data (check ticker on Yahoo Finance): " + ", ".join(missing))
 
     with tab_fund:
         st.subheader("🔬 Fundamentals — full yfinance metric set")
-        render_fundamentals_tab(monitored, quotes, zones, funds,
+        render_fundamentals_tab(MONITORED, quotes, zones, funds, metrics_map,
                                 wacc=wacc_pct / 100.0, terminal_g=tg_pct / 100.0)
 
     with tab_rules:
         render_rules_tab()
 
     st.caption(
-        f"Feed: yfinance  •  prices: snapshot {slot.strftime('%a %d %b %H:%M')} ET, fetched "
-        f"{fetched_at.strftime('%H:%M:%S') if fetched_at is not None else '—'}  •  next update "
-        f"{nxt.strftime('%a %H:%M')} ET  •  {len(monitored)} live tickers + "
-        f"{sum(1 for s in BRIGADE if s.get('static'))} static  •  fundamentals refresh daily  •  "
-        f"Monitor only — not investment advice."
-    )
+        f"Feed: yfinance  •  prices: snapshot {slot.strftime('%a %d %b %H:%M')} ET  •  next update "
+        f"{nxt.strftime('%a %H:%M')} ET  •  {len(MONITORED)} live tickers + "
+        f"{sum(1 for s in BRIGADE if s.get('static'))} static + "
+        f"{len(DELISTED)} excluded ({', '.join(sorted(DELISTED))} — delisted)  •  "
+        f"ATH = running max, refreshed incrementally + folded with today's intraday high  •  "
+        f"DCF = two-stage (5y growth → 5y fade → perpetuity)  •  fundamentals daily  •  "
+        f"{'holidays ignored (install pandas_market_calendars)' if not _HOLIDAYS else 'NYSE calendar'}  •  "
+        f"Monitor only — not investment advice.")
 
 
 if __name__ == "__main__":
