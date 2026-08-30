@@ -40,6 +40,16 @@ ZONES:  GREEN + name in ALL CAPS = in the buying range (or below, "getting
 lucky");  WHITE = within 10% above the buy top (adjustable);  RED + ALL CAPS
 = at/above the trim level;  dim gray = wait.
 
+RELIABILITY (cloud hosts)
+-------------------------
+Yahoo's API is unofficial and DOES intermittently throttle datacenter IPs
+(no hard block observed: 81/83 tickers worked from a cloud sandbox in one
+batch). All downloads are therefore hardened: chunked requests (25 tickers),
+retry with backoff (3 attempts), results merged across attempts, and a
+per-ticker history() fallback for anything a batch download misses. Dead
+tickers (RDFN delisted -> RKT; MPW has no Yahoo quote) are mapped/static so
+they never leave half-empty rows of '—'.
+
 Run:  pip install yfinance  &&  streamlit run ai_stocks_monitor.py
 """
 
@@ -117,7 +127,7 @@ BRIGADE = [
          note="[A comment] '$230 pumping', trim level asked — unanswered; exposure 125%."),
     dict(t="CRCL",  name="Circle",       buy_lo=50.0,   buy_hi=66.0,   target="640",
          note="[TW] trimming cryptos; exposure 126%."),
-    dict(t="BESI",  name="BESI",         buy_lo=145.0,  buy_hi=194.0,  target="2000", static=True,
+    dict(t="BESI",  name="BESI",         buy_lo=145.0,  buy_hi=194.0,  target="2000", static=True, why_static="non-US",
          note="Amsterdam-listed (€192.10 on the sheet) — not US, not live-monitored."),
     dict(t="DUOL",  name="Duolingo",     buy_lo=65.0,   buy_hi=105.0,  target="800",
          note="Exposure 48%."),
@@ -216,8 +226,11 @@ STOCKS = [
     dict(t="PFE", name="Pfizer", buy_lo=22.0, buy_hi=24.3, trim=None),
     dict(t="FOR", name="Forestar", buy_lo=15.0, buy_hi=20.0, trim=37.0, mech="Within 10% of High"),
     dict(t="IIPR", name="IIPR", buy_lo=38.0, buy_hi=44.0, trim=None),
-    dict(t="MPW", name="MPW", buy_lo=3.2, buy_hi=4.0, trim=None),
-    dict(t="RDFN", name="Redfin", buy_lo=10.0, buy_hi=12.3, trim=None),
+    dict(t="MPW", name="MPW (Medical Properties)", buy_lo=3.2, buy_hi=4.0, trim=None,
+         static=True, why_static="no Yahoo data", 
+         note="No Yahoo quote (delisted/404) — levels kept for reference only."),
+    dict(t="RKT", name="Rocket (was Redfin)", buy_lo=10.0, buy_hi=12.3, trim=None,
+         note="RDFN acquired by Rocket; sheet range was for RDFN."),
     dict(t="BABA", name="Alibaba", buy_lo=84.0, buy_hi=106.0, trim=None),
     dict(t="TCEHY", name="Tencent", buy_lo=40.0, buy_hi=55.0, trim=89.0, mech="Within 10% of High"),
     dict(t="MGNI", name="Magnite", buy_lo=8.6, buy_hi=11.6, trim=20.0, mech="$20–24"),
@@ -315,7 +328,49 @@ CRYPTO_REFERENCE = (
 # DATA — yfinance ONLY (real market data). One batched download per snapshot
 # for quotes (5d of 30m bars) and one per day for all-time highs (max daily).
 # ═══════════════════════════════════════════════════════════════════════════════
-ALL_TICKERS = [s["t"] for s in BRIGADE if not s.get("static")] + [s["t"] for s in STOCKS]
+ALL_TICKERS = ([s["t"] for s in BRIGADE if not s.get("static")] +
+               [s["t"] for s in STOCKS if not s.get("static")])
+
+
+def _chunks(seq, n: int):
+    """Split a sequence into chunks of size n (smaller Yahoo requests)."""
+    seq = list(seq)
+    return [seq[i:i + n] for i in range(0, len(seq), n)]
+
+
+def _retry(fn, attempts: int = 3, delay: float = 1.5):
+    """Run fn() up to `attempts` times (cloud throttling / transient 429s).
+    Returns the last result or raises the last exception."""
+    last = None
+    for i in range(max(1, attempts)):
+        try:
+            return fn()
+        except Exception as exc:   # noqa: BLE001 — retry any network error
+            last = exc
+            if i < attempts - 1:
+                time.sleep(delay * (i + 1))
+    raise last
+
+
+def _quote_via_history(ticker: str):
+    """Single-ticker fallback when the batch download yields nothing (some
+    OTC/ADR tickers only answer individual history() calls)."""
+    hist = yf.Ticker(ticker).history(period="5d", interval="30m", auto_adjust=False)
+    if hist is None or hist.empty:
+        return None
+    closes = hist["Close"].dropna()
+    if closes.empty:
+        return None
+    idx = closes.index
+    if idx[-1].tzinfo is None:
+        idx = idx.tz_localize(MARKET_TZ)
+    else:
+        idx = idx.tz_convert(MARKET_TZ)
+    price = float(closes.iloc[-1])
+    days = idx.normalize()
+    earlier = closes[days < days[-1]]
+    prev = float(earlier.iloc[-1]) if len(earlier) else None
+    return price, prev, idx[-1]
 
 
 def _parse_intraday(data) -> dict:
@@ -349,25 +404,48 @@ def _parse_intraday(data) -> dict:
 
 
 def _download_quotes() -> dict:
-    data = yf.download(tickers=ALL_TICKERS, period="5d", interval="30m",
-                       group_by="ticker", auto_adjust=False, progress=False, threads=True)
-    return _parse_intraday(data)
+    """[HARDENED] chunked batch downloads + retries + per-ticker history()
+    fallback. Partial results from failed chunks are kept and merged."""
+    out: dict = {}
+    for chunk in _chunks(ALL_TICKERS, 25):
+        try:
+            parsed = _retry(lambda c=chunk: _parse_intraday(yf.download(
+                tickers=c, period="5d", interval="30m", group_by="ticker",
+                auto_adjust=False, progress=False, threads=True)))
+            out.update(parsed)
+        except Exception:
+            continue   # one bad chunk must not lose the others
+    for t in ALL_TICKERS:
+        if t not in out:
+            try:
+                q = _retry(lambda tk=t: _quote_via_history(tk), attempts=2, delay=1.0)
+                if q is not None:
+                    out[t] = q
+            except Exception:
+                pass
+    return out
 
 
 def _download_aths() -> dict:
-    """{ticker: all-time-high price} from the full daily history (High)."""
-    data = yf.download(tickers=ALL_TICKERS, period="max", interval="1d",
-                       group_by="ticker", auto_adjust=False, progress=False, threads=True)
-    out = {}
-    if data is None or data.empty:
-        return out
-    for t in (data.columns.levels[0] if isinstance(data.columns, pd.MultiIndex) else []):
+    """[HARDENED] {ticker: all-time-high price} from the full daily history
+    (High) — chunked + retried, partial results kept."""
+    out: dict = {}
+    for chunk in _chunks(ALL_TICKERS, 25):
         try:
-            highs = data[t]["High"].dropna()
+            data = _retry(lambda c=chunk: yf.download(
+                tickers=c, period="max", interval="1d", group_by="ticker",
+                auto_adjust=False, progress=False, threads=True))
         except Exception:
             continue
-        if not highs.empty:
-            out[str(t)] = float(highs.max())
+        if data is None or data.empty:
+            continue
+        for t in (data.columns.levels[0] if isinstance(data.columns, pd.MultiIndex) else []):
+            try:
+                highs = data[t]["High"].dropna()
+            except Exception:
+                continue
+            if not highs.empty:
+                out[str(t)] = float(highs.max())
     return out
 
 
@@ -396,7 +474,7 @@ def _download_fundamentals() -> dict:
 
     def one(t):
         try:
-            return t, (yf.Ticker(t).info or {})
+            return t, (_retry(lambda tk=t: yf.Ticker(tk).info or {}, attempts=2, delay=1.0) or {})
         except Exception:
             return t, {}
 
@@ -629,7 +707,7 @@ def build_static_row(stock) -> str:
         f"<td style='padding:5px 8px; color:#8D6E63; font-weight:600;'>{stock['name']}</td>"
         f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
         f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
-        f"<td style='padding:5px 8px; color:#616161;'>NOT MONITORED (non-US)</td>"
+        f"<td style='padding:5px 8px; color:#616161;'>NOT MONITORED ({stock.get('why_static', 'non-US')})</td>"
         f"<td style='padding:5px 8px; color:#8D6E63;'>{fmt_range(stock)}</td>"
         f"<td style='padding:5px 8px; color:#8D6E63;'>—</td>"
         f"<td style='padding:5px 8px; color:#8D6E63;'>{stock.get('target') or '—'}</td>"
@@ -907,7 +985,8 @@ def main():
             "Walayat's published numbers. Monitor only — no orders. Not investment advice."
         )
 
-    monitored = [s for s in BRIGADE if not s.get("static")] + STOCKS
+    monitored = ([s for s in BRIGADE if not s.get("static")] +
+                 [s for s in STOCKS if not s.get("static")])
     quotes = {s["t"]: quotes.get(s["t"]) for s in monitored}
     zones = {s["t"]: zone_of(quotes[s["t"]][0] if quotes[s["t"]] else None, s, near_pct)
              for s in monitored}
@@ -945,6 +1024,9 @@ def main():
         st.subheader("Portfolio")
         rows = []
         for s in stocks:
+            if s.get("static"):
+                rows.append(build_static_row(s))
+                continue
             q = quotes[s["t"]]
             price, prev = (q[0], q[1]) if q else (None, None)
             rows.append(build_row(s, price, prev, zones[s["t"]], near_pct,
