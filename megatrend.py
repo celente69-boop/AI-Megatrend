@@ -79,6 +79,10 @@ VERSION 3 CHANGES
     from Walayat's sheets. Tab order: Monitor | Market Overview | Crypto |
     EGF | Fundamentals | Big Picture | Rules.
 
+  * FIX: Streamlit Cloud AttributeError on store.overview — cache_resource was
+    keeping a pre-v3 DataStore instance after deploy. STORE_VERSION cache key +
+    self-heal in _get_store() + Refresh clears the resource cache.
+
 Run:  pip install yfinance streamlit  &&  streamlit run ai_stocks_monitor_v3.py
 """
 
@@ -3140,11 +3144,38 @@ def render_rules_tab():
 # =============================================================================
 # APP
 # =============================================================================
+# Bump this whenever DataStore's public API changes. Streamlit's
+# @st.cache_resource keeps the live instance across reruns AND across code
+# pushes on Cloud until the process restarts — an old instance missing new
+# methods (e.g. overview / crypto_spot added in v3) raises AttributeError.
+STORE_VERSION = "v3.1-overview-crypto"
+
+
 @st.cache_resource
-def _store() -> DataStore:
+def _store(_version: str = STORE_VERSION) -> DataStore:
     """One store per server process. `cache_resource` (not `cache_data`) so the
-    background thread pool and its in-flight futures survive reruns."""
+    background thread pool and its in-flight futures survive reruns.
+
+    `_version` is part of the cache key: bump STORE_VERSION to force a fresh
+    DataStore after a deploy that adds methods, without waiting for a reboot.
+    """
     return DataStore()
+
+
+def _get_store() -> DataStore:
+    """Return a DataStore that is guaranteed to expose the current API.
+
+    Self-heals the Streamlit Cloud case where an older cached instance is still
+    alive after a push that added overview/crypto_spot.
+    """
+    store = _store(STORE_VERSION)
+    if not hasattr(store, "overview") or not hasattr(store, "crypto_spot"):
+        try:
+            _store.clear()
+        except Exception:
+            pass
+        store = _store(STORE_VERSION)
+    return store
 
 
 def main():
@@ -3174,7 +3205,7 @@ def main():
         "WHITE = within 10% of buy top  •  RED/ALL CAPS = trim zone  •  Levels: 26 Aug article › author "
         "comments › Trade Wind › portfolio sheet 25 Aug › briefs")
 
-    store = _store()
+    store = _get_store()
 
     # Sidebar first: refresh is a user action, and it must be able to clear the
     # disk cache before any load happens.
@@ -3197,6 +3228,10 @@ def main():
                     except Exception:
                         pass
             store.states.clear()
+            try:
+                _store.clear()  # drop any stale cached DataStore instance
+            except Exception:
+                pass
             st.rerun()
         st.caption(
             "Data: Yahoo Finance (yfinance). Levels are Nadeem Walayat's published numbers. "
@@ -3207,7 +3242,10 @@ def main():
     day_key = now.strftime("%Y-%m-%d")
 
     # Kick off refreshes in the background, then render from whatever is cached.
-    store.prefetch(slot_key, day_key)
+    try:
+        store.prefetch(slot_key, day_key)
+    except Exception:
+        pass  # never block the UI on a background warm
 
     quotes = store.quotes(slot_key)
     aths = store.aths()
@@ -3238,8 +3276,9 @@ def main():
                 st.markdown(f"- {_e(p)}")
 
     # Load overview + crypto (disk-first; prefetch already kicked them off).
-    overview = store.overview(day_key)
-    crypto_spot = store.crypto_spot()
+    # getattr fallbacks keep a half-upgraded cached store from crashing the app.
+    overview = store.overview(day_key) if hasattr(store, "overview") else {}
+    crypto_spot = store.crypto_spot() if hasattr(store, "crypto_spot") else {}
 
     (tab_monitor, tab_overview, tab_crypto, tab_egf,
      tab_fund, tab_big, tab_rules) = st.tabs([
