@@ -347,7 +347,7 @@ STOCKS = [
         mech='Within 10% of High',
         section='Medium Risk',
     ),
-    dict(t='AEHR', name='AEHR', section='Watch'),
+    dict(t="AEHR", name="AEHR", buy_lo=None, buy_hi=73.7, trim=132.66, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $147.40 (2026-08-14). Buy top = 50% off ATH; trim = within 10% of ATH."),
     dict(
         t='ALB',
         name='Albemarle',
@@ -378,7 +378,7 @@ STOCKS = [
         section='Primary',
         note="[A] won't add much above $300; dream drop $200. Sheet buy $180–$260.",
     ),
-    dict(t='AMT', name='American Tower', section='Watch'),
+    dict(t="AMT", name="American Tower", buy_lo=None, buy_hi=151.86, trim=273.35, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $303.72 (2021-09-08). Buy top = 50% off ATH; trim = within 10% of ATH."),
     dict(
         t='AMZN',
         name='Amazon',
@@ -439,15 +439,7 @@ STOCKS = [
         section='Medium Risk',
         note="[A] 'buy the dumps such as BIDU'; 18 Aug mega buys to $88.",
     ),
-    dict(
-        t='BKNG',
-        name='Booking',
-        buy_lo=None,
-        buy_hi=None,
-        trim=None,
-        section='Other',
-        note='[B] accumulate on dips, trim pumps — no published numeric range.',
-    ),
+    dict(t="BKNG", name="Booking", buy_lo=None, buy_hi=116.79, trim=210.22, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $233.58 (2025-07-08). Buy top = 50% off ATH; trim = within 10% of ATH."),
     dict(
         t='CCJ',
         name='Cameco',
@@ -547,7 +539,7 @@ STOCKS = [
         note='[A] support 332 — break targets 300/272/240. Sheet buy $228–$292.',
     ),
     dict(t='GPN', name='GPN', buy_lo=62.0, buy_hi=68.0, trim=None, section='Medium Risk'),
-    dict(t='GSK', name='GSK', section='Watch'),
+    dict(t="GSK", name="GSK", buy_lo=None, buy_hi=38.09, trim=68.57, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $76.19 (1999-01-08). Buy top = 50% off ATH; trim = within 10% of ATH."),
     dict(t='HPQ', name='HP', buy_lo=16.0, buy_hi=18.6, trim=28.0, mech='$28–30', section='Medium Risk'),
     dict(
         t='IBM',
@@ -635,15 +627,7 @@ STOCKS = [
         note='[A] 450s → below 400 → as low as 360 (puke case 240). Sheet buy $448–$548.',
     ),
     dict(t='MGNI', name='Magnite', buy_lo=8.6, buy_hi=11.6, trim=20.0, mech='$20–24', section='High Risk'),
-    dict(
-        t='MRNA',
-        name='Moderna',
-        buy_lo=None,
-        buy_hi=None,
-        trim=None,
-        section='Other',
-        note="[A] 'sell the pumps' — sold 70% into the 3x pop. No levels.",
-    ),
+    dict(t="MRNA", name="Moderna", buy_lo=None, buy_hi=248.74, trim=447.74, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $497.49 (2021-08-10). Buy top = 50% off ATH; trim = within 10% of ATH."),
     dict(
         t='MSFT',
         name='Microsoft',
@@ -744,7 +728,7 @@ STOCKS = [
         section='Climate',
         note='[Sheet 25 Aug] buy $37–$44, trim $60. Briefs wider $32–$60.',
     ),
-    dict(t='SNAP', name='Snap', section='Watch'),
+    dict(t="SNAP", name="Snap", buy_lo=None, buy_hi=41.67, trim=75.01, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $83.34 (2021-09-24). Buy top = 50% off ATH; trim = within 10% of ATH."),
     dict(
         t='SNPS',
         name='Synopsys',
@@ -776,7 +760,7 @@ STOCKS = [
         section='Other',
         note='[B 14 Jun] accumulate $400–$450 for eventual $600+.',
     ),
-    dict(t='TOELY', name='Tokyo Electron', section='Watch'),
+    dict(t="TOELY", name="Tokyo Electron", buy_lo=None, buy_hi=124.68, trim=224.43, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $249.37 (2026-06-29). Buy top = 50% off ATH; trim = within 10% of ATH."),
     dict(
         t='TSLA',
         name='Tesla',
@@ -808,7 +792,7 @@ STOCKS = [
         section='Healthcare',
         note='[Sheet 25 Aug] buy $234–$272, trim $422. [B] trim rallies.',
     ),
-    dict(t='V', name='Visa', section='Watch'),
+    dict(t="V", name="Visa", buy_lo=None, buy_hi=192.79, trim=347.01, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $385.57 (2026-08-26). Buy top = 50% off ATH; trim = within 10% of ATH."),
     dict(
         t='WDC',
         name='Western Digital',
