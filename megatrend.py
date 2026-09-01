@@ -79,6 +79,10 @@ VERSION 3 CHANGES
     from Walayat's sheets. Tab order: Monitor | Market Overview | Crypto |
     EGF | Fundamentals | Big Picture | Rules.
 
+  * v3.3: drop MRNA; chunked quote download + missing-ticker backfill so
+    partial Yahoo batches (AAPL/JNJ/GOOG…) no longer stick as "no quote".
+  * Premarket tab: Yahoo 1m extended-hours bars, gap vs prior close, zone at
+    pre price, distance to buy/trim. Real data only.
   * FIX: Streamlit Cloud AttributeError on store.overview — cache_resource was
     keeping a pre-v3 DataStore instance after deploy. STORE_VERSION cache key +
     self-heal in _get_store() + Refresh clears the resource cache.
@@ -128,6 +132,7 @@ ATH_TTL_S = 12 * 3600          # running maximum moves slowly
 FUND_TTL_S = 24 * 3600         # fundamentals refresh once per day
 OVERVIEW_TTL_S = 60 * 60       # benchmarks / earnings / week lookback
 CRYPTO_TTL_S = 60 * 30         # spot crypto
+PREMARKET_TTL_S = 60 * 2       # extended-hours bars go stale fast
 ATH_INCREMENTAL_LOOKBACK_DAYS = 30
 
 # Network policy. Yahoo rate-limits aggressively; fewer workers + backoff beats
@@ -631,7 +636,6 @@ STOCKS = [
         note='[A] 450s → below 400 → as low as 360 (puke case 240). Sheet buy $448–$548.',
     ),
     dict(t='MGNI', name='Magnite', buy_lo=8.6, buy_hi=11.6, trim=20.0, mech='$20–24', section='High Risk'),
-    dict(t="MRNA", name="Moderna", buy_lo=None, buy_hi=248.74, trim=447.74, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $497.49 (2021-08-10). Buy top = 50% off ATH; trim = within 10% of ATH."),
     dict(
         t='MSFT',
         name='Microsoft',
@@ -1144,6 +1148,10 @@ DELISTED: dict[str, str] = {
     "MPW": "delisted — no Yahoo data",
     "RDFN": "delisted — no Yahoo data",
 }
+# Intentionally removed from the book (user request) — not monitored.
+DROPPED: dict[str, str] = {
+    "MRNA": "removed from book",
+}
 
 PORTFOLIO: list[dict] = [s for s in STOCKS if s["t"] not in DELISTED]
 MONITORED: list[dict] = [s for s in BRIGADE if not s.get("static")] + PORTFOLIO
@@ -1332,13 +1340,38 @@ def _parse_high(data) -> dict:
 # =============================================================================
 # FETCHERS (network)
 # =============================================================================
-def _download_quotes() -> tuple[dict, dict]:
-    """Return ({ticker: (price, prev_close, ts)}, {ticker: window_high})."""
+def _download_quotes_chunk(tickers: Sequence[str]) -> tuple[dict, dict]:
+    """One Yahoo batch. Empty tickers -> empty dicts."""
+    if not tickers:
+        return {}, {}
     data = with_retry(lambda: yf.download(
-        tickers=ALL_TICKERS, period="5d", interval="30m",
+        tickers=list(tickers), period="5d", interval="30m",
         group_by="ticker", auto_adjust=False, progress=False, threads=True),
-        label="quotes")
+        label=f"quotes:{len(tickers)}")
     return _parse_intraday(data), _parse_window_high(data)
+
+
+def _download_quotes(tickers: Optional[Sequence[str]] = None) -> tuple[dict, dict]:
+    """Return ({ticker: (price, prev_close, ts)}, {ticker: window_high}).
+
+    Yahoo silently drops names from large multi-ticker 30m pulls (Cloud saw
+    AAPL/JNJ/GOOG etc. missing while a 10-name batch returned them all). Fix:
+    fetch in chunks of 25, then one backfill pass on whatever is still missing.
+    """
+    tickers = list(tickers or ALL_TICKERS)
+    quotes: dict = {}
+    highs: dict = {}
+    chunk_size = 25
+    for i in range(0, len(tickers), chunk_size):
+        q, h = _download_quotes_chunk(tickers[i:i + chunk_size])
+        quotes.update(q)
+        highs.update(h)
+    missing = [t for t in tickers if t not in quotes]
+    if missing:
+        q, h = _download_quotes_chunk(missing)
+        quotes.update(q)
+        highs.update(h)
+    return quotes, highs
 
 
 def _download_aths_full(tickers: Sequence[str]) -> dict:
@@ -1562,6 +1595,121 @@ def _download_week_returns(tickers: Sequence[str]) -> dict:
         ref = float(closes.iloc[ref_idx])
         if ref:
             out[t] = {"price": price, "ref": ref, "week_pct": price / ref - 1.0}
+    return out
+
+
+
+def _session_phase(now: Optional[pd.Timestamp] = None) -> str:
+    """PRE / REGULAR / POST / CLOSED from the NY clock. Weekends/holidays = CLOSED."""
+    now = now or pd.Timestamp.now(tz=MARKET_TZ)
+    if not _is_trading_day(now):
+        return "CLOSED"
+    m = now.hour * 60 + now.minute
+    if 4 * 60 <= m < 9 * 60 + 30:
+        return "PRE"
+    if 9 * 60 + 30 <= m < 16 * 60:
+        return "REGULAR"
+    if 16 * 60 <= m < 20 * 60:
+        return "POST"
+    return "CLOSED"
+
+
+def _download_premarket(tickers: Sequence[str]) -> dict:
+    """Extended-hours snapshot from Yahoo 1m bars (prepost=True). Real data only.
+
+    For each ticker returns:
+      pre_last, pre_high, pre_low, pre_open, prev_close, pre_vs_prev,
+      last_ts, n_bars
+    Missing pieces stay absent (caller renders em-dash). Volume is often 0 on
+    Yahoo pre bars — we do not invent it.
+    """
+    if not tickers or not YF_OK:
+        return {}
+    data = with_retry(lambda: yf.download(
+        tickers=list(tickers), period="1d", interval="1m", prepost=True,
+        group_by="ticker", auto_adjust=False, progress=False, threads=True),
+        label="premarket")
+    out: dict[str, dict] = {}
+    for t in tickers:
+        try:
+            if isinstance(data.columns, pd.MultiIndex):
+                if t not in data.columns.get_level_values(0):
+                    continue
+                frame = data[t].dropna(how="all")
+            else:
+                frame = data.dropna(how="all")
+            if frame is None or frame.empty or "Close" not in frame.columns:
+                continue
+            idx = frame.index
+            et = idx.tz_convert(MARKET_TZ) if idx.tz is not None else idx
+            # rebuild with ET index for hour filter
+            f = frame.copy()
+            f.index = et
+            mins = f.index.hour * 60 + f.index.minute
+            pre = f[(mins >= 4 * 60) & (mins < 9 * 60 + 30)]
+            # previous close: last regular-session close before pre, else prior day
+            reg = f[(mins >= 9 * 60 + 30) & (mins < 16 * 60)]
+            prev_close = None
+            # Prefer close of the last completed regular minute before today pre —
+            # on a live pre session, reg is empty so fall back to first pre open's
+            # reference via a separate daily bar would be another request; instead
+            # use the last close at/before 16:00 yesterday if present in the 1d window.
+            # yfinance 1d/1m only covers "today", so prev_close often needs daily.
+            # We'll fill prev_close in a second cheap daily pull below if missing.
+            row: dict = {}
+            if not pre.empty:
+                closes = pre["Close"].dropna()
+                highs = pre["High"].dropna()
+                lows = pre["Low"].dropna()
+                opens = pre["Open"].dropna()
+                if closes.empty:
+                    continue
+                row["pre_last"] = float(closes.iloc[-1])
+                row["last_ts"] = closes.index[-1].isoformat()
+                row["n_bars"] = int(len(closes))
+                if not highs.empty:
+                    row["pre_high"] = float(highs.max())
+                if not lows.empty:
+                    row["pre_low"] = float(lows.min())
+                if not opens.empty:
+                    row["pre_open"] = float(opens.iloc[0])
+            # During REGULAR/POST, still expose today's pre range if bars exist
+            # (useful lookback). If no pre bars (weekend), skip.
+            if not row:
+                continue
+            out[t] = row
+        except Exception:
+            continue
+
+    # prev_close from a single daily pull (real Yahoo closes)
+    missing_prev = [t for t in out]
+    if missing_prev:
+        try:
+            daily = with_retry(lambda: yf.download(
+                tickers=missing_prev, period="5d", interval="1d",
+                group_by="ticker", auto_adjust=False, progress=False, threads=True),
+                label="premarket:prev")
+            for t in missing_prev:
+                closes = _series(daily, t, "Close")
+                if closes is None or len(closes) < 2:
+                    # one bar only — use it as prev if pre is today after that close
+                    if closes is not None and len(closes) == 1:
+                        out[t]["prev_close"] = float(closes.iloc[-1])
+                    continue
+                # last daily close is "today" once regular has printed a bar;
+                # for pure pre, last daily close is yesterday.
+                phase = _session_phase()
+                if phase == "PRE":
+                    prev = float(closes.iloc[-1])
+                else:
+                    # after open, yesterday = -2 if today already in frame
+                    prev = float(closes.iloc[-2]) if len(closes) >= 2 else float(closes.iloc[-1])
+                out[t]["prev_close"] = prev
+                last = out[t].get("pre_last")
+                if last is not None and prev:
+                    out[t]["pre_vs_prev"] = last / prev - 1.0
+        except Exception:
+            pass
     return out
 
 
@@ -1933,15 +2081,37 @@ class DataStore:
         # New shape bundles the window highs with the quotes; tolerate an older
         # cache that stored the quotes dict on its own.
         if isinstance(raw, dict) and isinstance(raw.get("quotes"), dict):
-            self.window_highs = raw.get("highs") or {}
-            raw = raw["quotes"]
+            self.window_highs = dict(raw.get("highs") or {})
+            raw_q = dict(raw.get("quotes") or {})
+        else:
+            raw_q = dict(raw or {})
+
+        # Backfill: partial caches (Yahoo dropped names mid-batch) used to stick
+        # for the full quote TTL. Pull ONLY the missing tickers and merge.
+        missing = [t for t in ALL_TICKERS if t not in raw_q or not raw_q.get(t)]
+        if missing and not self.offline and wait:
+            try:
+                q2, h2 = _download_quotes(missing)
+                if q2:
+                    raw_q.update(q2)
+                    self.window_highs.update(h2 or {})
+                    self.cache.put(key, {"quotes": raw_q, "highs": self.window_highs})
+                    stt.note = (stt.note + "; " if stt.note else "") + f"backfilled {len(q2)}/{len(missing)}"
+            except Exception as exc:
+                stt.errors["_backfill"] = f"{type(exc).__name__}: {exc}"
+
         out: dict[str, Any] = {t: None for t in ALL_TICKERS}
-        for t, v in raw.items():
+        for t, v in raw_q.items():
             if t in out and v:
-                price, prev, ts = v
-                out[t] = (price, prev, pd.Timestamp(ts))
+                try:
+                    price, prev, ts = v
+                    out[t] = (price, prev, pd.Timestamp(ts))
+                except Exception:
+                    out[t] = None
         stt.stale = False
         stt.n = sum(1 for v in out.values() if v)
+        # rebuild missing list after backfill — only real holes stay as errors
+        stt.errors = {k: v for k, v in stt.errors.items() if k.startswith("_")}
         stt.errors.update({t: "no quote" for t, v in out.items() if v is None})
         return out
 
@@ -2046,6 +2216,31 @@ class DataStore:
                 stt.stale, stt.note = True, "serving last cached crypto"
         return spot or {}
 
+    def _fetch_premarket(self) -> Optional[dict]:
+        stt = self._state("premarket")
+        try:
+            t0 = time.perf_counter()
+            raw = _download_premarket(EQUITY_TICKERS)
+            self.cache.put("premarket", raw)
+            stt.seconds = round(time.perf_counter() - t0, 2)
+            stt.fetched, stt.stale, stt.n = True, False, len(raw)
+            return raw
+        except Exception as exc:
+            stt.errors["_fetch"] = f"{type(exc).__name__}: {exc}"
+            return None
+
+    def premarket(self, wait: bool = True) -> dict:
+        stt = self._state("premarket")
+        raw = self.cache.get("premarket", max_age_s=PREMARKET_TTL_S)
+        if raw is None and not self.offline:
+            raw = self._run("premarket", self._fetch_premarket, wait=wait)
+        if raw is None:
+            raw = self.cache.get("premarket", max_age_s=None)
+            if raw is not None:
+                stt.stale, stt.note = True, "serving last cached premarket"
+        return raw or {}
+
+
     # -- background warming ------------------------------------------------
     def prefetch(self, slot_key: str, day_key: str) -> None:
         """Start a refresh for anything stale. Never blocks, never duplicates:
@@ -2062,6 +2257,11 @@ class DataStore:
             self._start(f"overview-{day_key}", lambda: self._fetch_overview(day_key))
         if self.cache.get("crypto-spot", CRYPTO_TTL_S) is None:
             self._start("crypto-spot", self._fetch_crypto)
+        # Premarket: only auto-warm in the pre/early-regular window so we don't
+        # burn Yahoo quota all day for a tab nobody is staring at after 11 ET.
+        phase = _session_phase()
+        if phase in ("PRE", "REGULAR") and self.cache.get("premarket", PREMARKET_TTL_S) is None:
+            self._start("premarket", self._fetch_premarket)
 
     def pending(self) -> list[str]:
         names = {"ath-state": "ath"}
@@ -2075,7 +2275,7 @@ class DataStore:
     def status_line(self) -> str:
         bits = []
         inflight = set(self.pending())
-        for name in ("quotes", "ath", "fundamentals", "overview", "crypto"):
+        for name in ("quotes", "ath", "fundamentals", "overview", "crypto", "premarket"):
             s = self.states.get(name)
             if not s:
                 continue
@@ -3097,6 +3297,101 @@ def render_big_picture_tab() -> None:
 
 
 
+def render_premarket_tab(pre: dict, zones_live: dict, near_pct: float) -> None:
+    """Premarket / extended-hours board. Yahoo 1m prepost bars only — no fills."""
+    st.subheader("🌅 Premarket")
+    phase = _session_phase()
+    now = pd.Timestamp.now(tz=MARKET_TZ)
+    phase_note = {
+        "PRE": "Pre-market session (04:00–09:30 ET). Prices below are extended-hours prints.",
+        "REGULAR": "Regular session. Premarket columns show today's 04:00–09:30 range (lookback).",
+        "POST": "After-hours. Premarket columns are today's 04:00–09:30 lookback.",
+        "CLOSED": "Market closed. Last cached premarket print if available — nothing is invented.",
+    }.get(phase, phase)
+    st.caption(f"{now.strftime('%a %d %b %H:%M ET')}  ·  session: **{phase}**  ·  {phase_note}")
+    _how_to_box("How to use Premarket", [
+        "Gap % = pre last ÷ prior regular close − 1. A dump into your buy range is often the pain trade; a rip into trim is a scale-out candidate.",
+        "Zone @ pre applies your published buy/trim levels to the premarket last — same rules as Monitor.",
+        "Pre high/low is the overnight range. Wide range + tiny move into the open = noise; tight range into buy = cleaner.",
+        "Yahoo often reports 0 pre volume — we show — rather than fake a number.",
+        "Decide sizing on Monitor + EGF + earnings (Market Overview). Premarket is the gap radar, not a new strategy.",
+    ])
+
+    if not pre:
+        st.warning("No premarket bars from Yahoo right now (closed weekend, feed lag, or cache empty). "
+                   "Press **Refresh data now** during 04:00–09:30 ET.")
+        return
+
+    # Sort: biggest absolute gap first (actionable), then ticker
+    rows_data = []
+    for t, r in pre.items():
+        s = BY_TICKER.get(t)
+        if not s:
+            continue
+        last = r.get("pre_last")
+        gap = r.get("pre_vs_prev")
+        z = zone_of(last, s, near_pct) if last is not None else ZONE_NODATA
+        rows_data.append((abs(gap) if gap is not None else -1.0, t, s, r, z, gap))
+    rows_data.sort(key=lambda x: (-x[0], x[1]))
+
+    # Summary strip
+    n_buy = sum(1 for *_, z, __ in ((None, None, None, None, rd[4], rd[5]) for rd in rows_data) if False)
+    n_buy = sum(1 for rd in rows_data if rd[4] == ZONE_BUY)
+    n_trim = sum(1 for rd in rows_data if rd[4] == ZONE_TRIM)
+    n_near = sum(1 for rd in rows_data if rd[4] == ZONE_NEAR)
+    gaps = [rd[5] for rd in rows_data if rd[5] is not None]
+    med = sorted(gaps)[len(gaps)//2] if gaps else None
+    st.markdown(
+        f"**{len(rows_data)}** names with pre prints  ·  "
+        f"🟢 BUY {n_buy}  ·  ⚪ NEAR {n_near}  ·  🔴 TRIM {n_trim}  ·  "
+        f"median gap {fmt_g(med) if med is not None else DASH}"
+    )
+
+    body = []
+    for _, t, s, r, z, gap in rows_data:
+        cls = ZONE_CLASSES.get(z, "z-wait")
+        gap_html = DASH
+        if gap is not None:
+            col = "c-ok" if gap > 0 else ("c-bad" if gap < 0 else "c-mut")
+            gap_html = f"<span class='{col}'>{gap*100:+.2f}%</span>"
+        # distance to buy top / trim if we have last
+        last = r.get("pre_last")
+        buy_hi = _num(s.get("buy_hi"))
+        trim = _num(s.get("trim"))
+        to_buy = DASH
+        to_trim = DASH
+        if last is not None and buy_hi:
+            to_buy = f"{(last/buy_hi - 1)*100:+.1f}%"
+        if last is not None and trim:
+            to_trim = f"{(last/trim - 1)*100:+.1f}%"
+        body.append(
+            "<tr>"
+            + _cell(_e(t), "tk")
+            + _cell(_e(s.get("name", t)), f"nm {cls}")
+            + _cell(fmt_money(last))
+            + _cell(gap_html)
+            + _cell(fmt_money(r.get("prev_close")))
+            + _cell(fmt_money(r.get("pre_open")))
+            + _cell(fmt_money(r.get("pre_low")))
+            + _cell(fmt_money(r.get("pre_high")))
+            + _cell(_e(fmt_range(s)))
+            + _cell(_e(to_buy))
+            + _cell(_e(to_trim))
+            + _cell(_e(z), f"st {cls}")
+            + "</tr>"
+        )
+    heads = ["Ticker", "Company", "Pre last", "Gap vs prev", "Prev close",
+             "Pre open", "Pre low", "Pre high", "Buy range", "% vs buy top",
+             "% vs trim", "Zone @ pre"]
+    th = "".join(f"<th>{_e(h)}</th>" for h in heads)
+    st.markdown(TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>"
+                + "".join(body) + "</table>", unsafe_allow_html=True)
+    st.caption("Source: Yahoo Finance 1-minute extended-hours bars (prepost). "
+               "Gap uses prior regular daily close. Sorted by |gap|. "
+               "Missing = em-dash.")
+
+
+
 def inject_theme() -> None:
     """[THEME] main window = deep blue, sidebar = deep plum (user preference)."""
     st.markdown(
@@ -3148,7 +3443,7 @@ def render_rules_tab():
 # @st.cache_resource keeps the live instance across reruns AND across code
 # pushes on Cloud until the process restarts — an old instance missing new
 # methods (e.g. overview / crypto_spot added in v3) raises AttributeError.
-STORE_VERSION = "v3.1-overview-crypto"
+STORE_VERSION = "v3.3-quotes-backfill"
 
 
 @st.cache_resource
@@ -3169,7 +3464,7 @@ def _get_store() -> DataStore:
     alive after a push that added overview/crypto_spot.
     """
     store = _store(STORE_VERSION)
-    if not hasattr(store, "overview") or not hasattr(store, "crypto_spot"):
+    if not hasattr(store, "overview") or not hasattr(store, "crypto_spot") or not hasattr(store, "premarket"):
         try:
             _store.clear()
         except Exception:
@@ -3279,10 +3574,12 @@ def main():
     # getattr fallbacks keep a half-upgraded cached store from crashing the app.
     overview = store.overview(day_key) if hasattr(store, "overview") else {}
     crypto_spot = store.crypto_spot() if hasattr(store, "crypto_spot") else {}
+    premarket = store.premarket() if hasattr(store, "premarket") else {}
 
-    (tab_monitor, tab_overview, tab_crypto, tab_egf,
+    (tab_monitor, tab_pre, tab_overview, tab_crypto, tab_egf,
      tab_fund, tab_big, tab_rules) = st.tabs([
         "📈 Monitor",
+        "🌅 Premarket",
         "🌐 Market Overview",
         "🪙 Crypto",
         "📈 EGF",
@@ -3347,6 +3644,9 @@ def main():
             st.markdown(CRYPTO_REFERENCE)
             if missing:
                 st.caption("No data (check ticker on Yahoo Finance): " + ", ".join(missing))
+
+    with tab_pre:
+        render_premarket_tab(premarket, zones, near_pct)
 
     with tab_overview:
         render_market_overview_tab(overview, quotes, zones, metrics_map, near_pct)
