@@ -79,6 +79,7 @@ VERSION 3 CHANGES
     from Walayat's sheets. Tab order: Monitor | Market Overview | Crypto |
     EGF | Fundamentals | Big Picture | Rules.
 
+  * v3.4: quote ladder 30m→daily batch→solo daily + last-good cache; short TTL.
   * v3.3: drop MRNA; chunked quote download + missing-ticker backfill so
     partial Yahoo batches (AAPL/JNJ/GOOG…) no longer stick as "no quote".
   * Premarket tab: Yahoo 1m extended-hours bars, gap vs prior close, zone at
@@ -127,7 +128,7 @@ CACHE_DIR = Path(os.environ.get("AI_PORTFOLIO_CACHE", Path.home() / ".cache" / "
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # TTLs (seconds)
-QUOTE_TTL_S = 60 * 90          # a snapshot is authoritative until the next slot
+QUOTE_TTL_S = 60 * 30          # 30m — short enough that a partial batch heals next open
 ATH_TTL_S = 12 * 3600          # running maximum moves slowly
 FUND_TTL_S = 24 * 3600         # fundamentals refresh once per day
 OVERVIEW_TTL_S = 60 * 60       # benchmarks / earnings / week lookback
@@ -1340,37 +1341,95 @@ def _parse_high(data) -> dict:
 # =============================================================================
 # FETCHERS (network)
 # =============================================================================
-def _download_quotes_chunk(tickers: Sequence[str]) -> tuple[dict, dict]:
-    """One Yahoo batch. Empty tickers -> empty dicts."""
+def _download_quotes_batch(tickers: Sequence[str], *, period: str, interval: str) -> tuple[dict, dict]:
+    """One Yahoo batch at the given bar size. Empty -> empty."""
     if not tickers:
         return {}, {}
     data = with_retry(lambda: yf.download(
-        tickers=list(tickers), period="5d", interval="30m",
+        tickers=list(tickers), period=period, interval=interval,
         group_by="ticker", auto_adjust=False, progress=False, threads=True),
-        label=f"quotes:{len(tickers)}")
+        label=f"quotes:{interval}:{len(tickers)}")
     return _parse_intraday(data), _parse_window_high(data)
+
+
+def _quote_ticker_solo(t: str) -> tuple[Optional[tuple], Optional[float]]:
+    """Last-resort single-ticker quote from Yahoo daily bars (most reliable).
+
+    Returns ((price, prev, ts_iso), window_high) or (None, None). Real data only.
+    """
+    try:
+        def load():
+            return yf.Ticker(t).history(period="10d", interval="1d", auto_adjust=False)
+        df = with_retry(load, attempts=2, label=f"quote1d:{t}")
+        if df is None or df.empty or "Close" not in df.columns:
+            return None, None
+        closes = df["Close"].dropna()
+        if closes.empty:
+            return None, None
+        price = float(closes.iloc[-1])
+        prev = float(closes.iloc[-2]) if len(closes) > 1 else None
+        ts = closes.index[-1]
+        if getattr(ts, "tzinfo", None) is None:
+            ts = pd.Timestamp(ts).tz_localize(MARKET_TZ)
+        else:
+            ts = pd.Timestamp(ts).tz_convert(MARKET_TZ)
+        high = None
+        if "High" in df.columns:
+            highs = df["High"].dropna()
+            if not highs.empty:
+                high = float(highs.max())
+        return (price, prev, ts.isoformat()), high
+    except Exception:
+        return None, None
 
 
 def _download_quotes(tickers: Optional[Sequence[str]] = None) -> tuple[dict, dict]:
     """Return ({ticker: (price, prev_close, ts)}, {ticker: window_high}).
 
-    Yahoo silently drops names from large multi-ticker 30m pulls (Cloud saw
-    AAPL/JNJ/GOOG etc. missing while a 10-name batch returned them all). Fix:
-    fetch in chunks of 25, then one backfill pass on whatever is still missing.
+    Ladder (real Yahoo only — never invents prices):
+      1. 30m bars in chunks of 15 (intraday day-%)
+      2. daily bars for whatever 30m still dropped
+      3. per-ticker daily history for any stubborn leftovers
     """
     tickers = list(tickers or ALL_TICKERS)
     quotes: dict = {}
     highs: dict = {}
-    chunk_size = 25
-    for i in range(0, len(tickers), chunk_size):
-        q, h = _download_quotes_chunk(tickers[i:i + chunk_size])
-        quotes.update(q)
-        highs.update(h)
+
+    def _merge(q, h):
+        quotes.update(q or {})
+        highs.update(h or {})
+
+    # Pass 1 — intraday 30m, small chunks (Yahoo drops names from big batches)
+    chunk = 15
+    for i in range(0, len(tickers), chunk):
+        try:
+            _merge(*_download_quotes_batch(tickers[i:i + chunk], period="5d", interval="30m"))
+        except Exception:
+            pass
+
+    # Pass 2 — daily batch for holes (blue chips always have daily)
     missing = [t for t in tickers if t not in quotes]
     if missing:
-        q, h = _download_quotes_chunk(missing)
-        quotes.update(q)
-        highs.update(h)
+        try:
+            _merge(*_download_quotes_batch(missing, period="10d", interval="1d"))
+        except Exception:
+            pass
+        # daily in micro-chunks if the one-shot still dropped some
+        still = [t for t in missing if t not in quotes]
+        for i in range(0, len(still), 10):
+            try:
+                _merge(*_download_quotes_batch(still[i:i + 10], period="10d", interval="1d"))
+            except Exception:
+                pass
+
+    # Pass 3 — solo daily per leftover
+    for t in [t for t in tickers if t not in quotes]:
+        q1, h1 = _quote_ticker_solo(t)
+        if q1:
+            quotes[t] = q1
+            if h1 is not None:
+                highs[t] = h1
+
     return quotes, highs
 
 
@@ -2077,28 +2136,62 @@ class DataStore:
             if raw is not None:
                 stt.stale, stt.note = True, "serving last cached snapshot"
         if raw is None:
-            return {t: None for t in ALL_TICKERS}
-        # New shape bundles the window highs with the quotes; tolerate an older
-        # cache that stored the quotes dict on its own.
+            raw = {"quotes": {}, "highs": {}}
+
         if isinstance(raw, dict) and isinstance(raw.get("quotes"), dict):
             self.window_highs = dict(raw.get("highs") or {})
             raw_q = dict(raw.get("quotes") or {})
         else:
             raw_q = dict(raw or {})
+            self.window_highs = dict(self.window_highs or {})
 
-        # Backfill: partial caches (Yahoo dropped names mid-batch) used to stick
-        # for the full quote TTL. Pull ONLY the missing tickers and merge.
-        missing = [t for t in ALL_TICKERS if t not in raw_q or not raw_q.get(t)]
+        allowed = set(ALL_TICKERS)
+        raw_q = {t: v for t, v in raw_q.items() if t in allowed and v}
+        self.window_highs = {t: v for t, v in (self.window_highs or {}).items() if t in allowed}
+
+        # Always fill holes (partial Yahoo batch OR stale partial cache).
+        missing = [t for t in ALL_TICKERS if t not in raw_q]
         if missing and not self.offline and wait:
             try:
                 q2, h2 = _download_quotes(missing)
                 if q2:
                     raw_q.update(q2)
                     self.window_highs.update(h2 or {})
-                    self.cache.put(key, {"quotes": raw_q, "highs": self.window_highs})
-                    stt.note = (stt.note + "; " if stt.note else "") + f"backfilled {len(q2)}/{len(missing)}"
+                    stt.note = ((stt.note + "; ") if stt.note else "") + f"backfilled {len(q2)}/{len(missing)}"
             except Exception as exc:
                 stt.errors["_backfill"] = f"{type(exc).__name__}: {exc}"
+
+        # Last-good: real quotes we have ever fetched. Fill any remaining holes
+        # from it (still real Yahoo data, just older — marked stale).
+        last_good = self.cache.get("quotes-last-good", max_age_s=None) or {}
+        lg_q = dict((last_good.get("quotes") or {}) if isinstance(last_good, dict) else {})
+        lg_h = dict((last_good.get("highs") or {}) if isinstance(last_good, dict) else {})
+        used_last_good = 0
+        for t in ALL_TICKERS:
+            if t not in raw_q and t in lg_q and lg_q[t]:
+                raw_q[t] = lg_q[t]
+                if t in lg_h:
+                    self.window_highs[t] = lg_h[t]
+                used_last_good += 1
+        if used_last_good:
+            stt.stale = True
+            stt.note = ((stt.note + "; ") if stt.note else "") + f"last-good {used_last_good}"
+
+        # Persist slot cache + last-good (only real quotes we hold now).
+        try:
+            payload = {"quotes": raw_q, "highs": self.window_highs}
+            self.cache.put(key, payload)
+            if raw_q:
+                # merge into last-good so a future partial fetch can recover
+                merged_q = dict(lg_q)
+                merged_q.update(raw_q)
+                merged_h = dict(lg_h)
+                merged_h.update(self.window_highs or {})
+                merged_q = {t: v for t, v in merged_q.items() if t in allowed}
+                merged_h = {t: v for t, v in merged_h.items() if t in allowed}
+                self.cache.put("quotes-last-good", {"quotes": merged_q, "highs": merged_h})
+        except Exception:
+            pass
 
         out: dict[str, Any] = {t: None for t in ALL_TICKERS}
         for t, v in raw_q.items():
@@ -2108,9 +2201,7 @@ class DataStore:
                     out[t] = (price, prev, pd.Timestamp(ts))
                 except Exception:
                     out[t] = None
-        stt.stale = False
         stt.n = sum(1 for v in out.values() if v)
-        # rebuild missing list after backfill — only real holes stay as errors
         stt.errors = {k: v for k, v in stt.errors.items() if k.startswith("_")}
         stt.errors.update({t: "no quote" for t, v in out.items() if v is None})
         return out
@@ -2361,8 +2452,13 @@ def compute_zones(prices: dict[str, Optional[float]], near_pct: float = NEAR_PCT
     """
     n = len(prices)
     if n < VECTOR_CROSSOVER or levels is not None:
-        by = BY_TICKER
-        return {t: zone_of(prices[t], by[t], near_pct) for t in prices}
+        by = BY_TICKER if levels is None else {
+            t: {"t": t, "buy_lo": levels[t][0], "buy_hi": levels[t][1], "trim": levels[t][2]}
+            for t in levels
+        }
+        # Only classify tickers we still have levels for. Stale quote caches can
+        # still carry names removed from the book (e.g. MRNA) — skip them.
+        return {t: zone_of(prices[t], by[t], near_pct) for t in prices if t in by}
     return _compute_zones_vector(prices, near_pct)
 
 
@@ -3443,7 +3539,7 @@ def render_rules_tab():
 # @st.cache_resource keeps the live instance across reruns AND across code
 # pushes on Cloud until the process restarts — an old instance missing new
 # methods (e.g. overview / crypto_spot added in v3) raises AttributeError.
-STORE_VERSION = "v3.3-quotes-backfill"
+STORE_VERSION = "v3.4-quote-ladder"
 
 
 @st.cache_resource
@@ -3555,7 +3651,7 @@ def main():
                 f"update only at 09:30 / 12:00 / 16:00 ET on trading days; re-open the app anytime "
                 f"to refresh.")
 
-    prices = {t: (q[0] if q else None) for t, q in quotes.items()}
+    prices = {t: (q[0] if q else None) for t, q in quotes.items() if t in BY_TICKER}
     zones = compute_zones(prices, near_pct)
 
     # Failures are data, not exceptions — show them instead of silent em-dashes.
