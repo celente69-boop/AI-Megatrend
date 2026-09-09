@@ -71,6 +71,9 @@ VERSION 4 CHANGES (8 Sept 2026 update)
   http://localhost:1234/v1) to ask questions about the article.
 * Crypto notes refreshed from the article (BTC base-case <$58k / 18-mo $48k,
   invalidation >$84k; SOL rebuy $70s, staggered trims from $105).
+* v4.1 FIX: cache keys embed a fingerprint of the monitored ticker book, so a
+  mid-session upgrade (adding LULU/NFLX) can never serve the pre-upgrade
+  snapshot for the current slot (which showed the new names as NO DATA).
 
 VERSION 3 CHANGES
 -----------------
@@ -92,6 +95,7 @@ VERSION 3 CHANGES
 Run:  pip install yfinance streamlit  &&  streamlit run ai_stocks_monitor.py
 """
 from __future__ import annotations
+import hashlib
 import html
 import json
 import os
@@ -1861,7 +1865,13 @@ DELISTED: dict[str, str] = {
 }
 PORTFOLIO: list[dict] = [s for s in STOCKS if s["t"] not in DELISTED]
 MONITORED: list[dict] = [s for s in BRIGADE if not s.get("static")] + PORTFOLIO
-ALL_TICKERS: list[str] = list(dict.fromkeys(s["t"] for s in MONITORED))  # de-dup, ordered
+ALL_TICKERS: list[str] = list(dict.fromkeys(s["t"] for s in MONITORED))  # de-dup, order
+# [v4.1 FIX] Fingerprint of the monitored book. Every quotes/funds/overview cache
+# key embeds it, so adding or removing a ticker (LULU/NFLX in v4) automatically
+# invalidates cache files written by an older book. Without it, a mid-session
+# upgrade kept serving the pre-upgrade snapshot for the CURRENT time slot and
+# the new names rendered NO DATA until the next 09:30/12:00/16:00 slot.
+BOOK_FP = hashlib.sha1(",".join(ALL_TICKERS).encode()).hexdigest()[:8]
 # Earnings / overview fetch set = equity book only (no crypto-USD pairs here).
 EQUITY_TICKERS: list[str] = list(ALL_TICKERS)
 # Levels as floats in one place, so the hot path never calls .get()/float().
@@ -3785,7 +3795,7 @@ def render_rules_tab():
 # @st.cache_resource keeps the live instance across reruns AND across code
 # pushes on Cloud until the process restarts — an old instance missing new
 # methods (e.g. overview / crypto_spot added in v3) raises AttributeError.
-STORE_VERSION = "v3.1-overview-crypto"
+STORE_VERSION = "v4.1-book-fp"
 @st.cache_resource
 def _store(_version: str = STORE_VERSION) -> DataStore:
     """One store per server process. `cache_resource` (not `cache_data`) so the
@@ -3859,8 +3869,10 @@ def main():
             "Data: Yahoo Finance (yfinance). Levels are Nadeem Walayat's published numbers. "
             "Nothing is simulated or defaulted: a missing figure is an em-dash and is "
             "counted above, never filled in. Monitor only — no orders. Not investment advice.")
-    slot_key = slot.strftime("%Y-%m-%d_%H-%M")
-    day_key = now.strftime("%Y-%m-%d")
+    # [v4.1 FIX] keys carry the book fingerprint -> a changed ticker list can
+    # never be served a pre-change snapshot from the disk cache.
+    slot_key = f"{slot:%Y-%m-%d_%H-%M}_{BOOK_FP}"
+    day_key = f"{now:%Y-%m-%d}_{BOOK_FP}"
     # Kick off refreshes in the background, then render from whatever is cached.
     try:
         store.prefetch(slot_key, day_key)
