@@ -71,6 +71,11 @@ VERSION 4 CHANGES (8 Sept 2026 update)
   http://localhost:1234/v1) to ask questions about the article.
 * Crypto notes refreshed from the article (BTC base-case <$58k / 18-mo $48k,
   invalidation >$84k; SOL rebuy $70s, staggered trims from $105).
+* v4.2 FIX (Streamlit Cloud AttributeError at store.premarket): a deploy that
+  adds a DataStore method must also change STORE_VERSION (cache_resource keeps
+  the previous instance alive across a push) — bumped to 'v4.2-premarket', and
+  _get_store() now verifies the FULL public API, derived from the class itself,
+  so any future method addition self-heals stale instances automatically.
 * v4.2 NEW TAB 'Premarket' (04:00-09:30 ET weekdays): premarket prints per ticker
   with gap vs the previous close, zone AT the premarket price, a 'gapping into
   buy range' callout and a big-movers list. No tab was replaced.
@@ -3942,7 +3947,11 @@ def render_rules_tab():
 # @st.cache_resource keeps the live instance across reruns AND across code
 # pushes on Cloud until the process restarts — an old instance missing new
 # methods (e.g. overview / crypto_spot added in v3) raises AttributeError.
-STORE_VERSION = "v4.1-book-fp"
+STORE_VERSION = "v4.2-premarket"
+# The public API a cached DataStore instance MUST expose. Derived from the
+# class itself so that adding a method in a future version automatically
+# makes stale (pre-deploy) instances fail this check and get rebuilt.
+DATASTORE_API = tuple(sorted(m for m in dir(DataStore) if not m.startswith("_")))
 @st.cache_resource
 def _store(_version: str = STORE_VERSION) -> DataStore:
     """One store per server process. `cache_resource` (not `cache_data`) so the
@@ -3952,12 +3961,14 @@ def _store(_version: str = STORE_VERSION) -> DataStore:
     """
     return DataStore()
 def _get_store() -> DataStore:
-    """Return a DataStore that is guaranteed to expose the current API.
-    Self-heals the Streamlit Cloud case where an older cached instance is still
-    alive after a push that added overview/crypto_spot.
-    """
+    """Return a DataStore guaranteed to expose the CURRENT DataStore API.
+    Self-heals the Streamlit Cloud case where @st.cache_resource keeps an older
+    instance alive across a deploy (v3: overview/crypto_spot, v4.2: premarket).
+    STORE_VERSION is passed as an argument so it is part of the cache key, and
+    the full-API check (DATASTORE_API, derived from the class) catches any
+    method added without a version bump."""
     store = _store(STORE_VERSION)
-    if not hasattr(store, "overview") or not hasattr(store, "crypto_spot"):
+    if not all(hasattr(store, m) for m in DATASTORE_API):
         try:
             _store.clear()
         except Exception:
