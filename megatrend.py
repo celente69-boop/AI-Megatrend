@@ -71,6 +71,9 @@ VERSION 4 CHANGES (8 Sept 2026 update)
   http://localhost:1234/v1) to ask questions about the article.
 * Crypto notes refreshed from the article (BTC base-case <$58k / 18-mo $48k,
   invalidation >$84k; SOL rebuy $70s, staggered trims from $105).
+* v4.2 NEW TAB 'Premarket' (04:00-09:30 ET weekdays): premarket prints per ticker
+  with gap vs the previous close, zone AT the premarket price, a 'gapping into
+  buy range' callout and a big-movers list. No tab was replaced.
 * v4.1 FIX: cache keys embed a fingerprint of the monitored ticker book, so a
   mid-session upgrade (adding LULU/NFLX) can never serve the pre-upgrade
   snapshot for the current slot (which showed the new names as NO DATA).
@@ -129,6 +132,7 @@ QUOTE_TTL_S = 60 * 90          # a snapshot is authoritative until the next slot
 ATH_TTL_S = 12 * 3600          # running maximum moves slowly
 FUND_TTL_S = 24 * 3600         # fundamentals refresh once per day
 OVERVIEW_TTL_S = 60 * 60       # benchmarks / earnings / week lookback
+PREMARKET_TTL_S = 60 * 5       # premarket prints refresh ~5 min while open
 CRYPTO_TTL_S = 60 * 30         # spot crypto
 ATH_INCREMENTAL_LOOKBACK_DAYS = 30
 # Network policy. Yahoo rate-limits aggressively; fewer workers + backoff beats
@@ -2030,6 +2034,33 @@ def _download_quotes() -> tuple[dict, dict]:
         group_by="ticker", auto_adjust=False, progress=False, threads=True),
         label="quotes")
     return _parse_intraday(data), _parse_window_high(data)
+def _download_premarket() -> dict:
+    """{ticker: (premarket_price, ts)} — today's PRE-market prints (bars before
+    09:30 ET) from yfinance's prepost feed. Names with no premarket trading
+    simply don't appear. One batched request, retried like every other call."""
+    data = with_retry(lambda: yf.download(
+        tickers=ALL_TICKERS, period="1d", interval="5m", prepost=True,
+        group_by="ticker", auto_adjust=False, progress=False, threads=True),
+        label="premarket")
+    out: dict = {}
+    open_min = 9 * 60 + 30
+    today = pd.Timestamp.now(tz=MARKET_TZ).normalize()
+    for t in _tickers_of(data):
+        closes = _series(data, t, "Close")
+        if closes is None or closes.empty:
+            continue
+        idx = closes.index
+        if idx.tz is None:
+            idx = idx.tz_localize(MARKET_TZ)
+        else:
+            idx = idx.tz_convert(MARKET_TZ)
+        pre = closes[(idx.normalize() == today) &
+                     (idx.hour * 60 + idx.minute < open_min)].dropna()
+        if not pre.empty:
+            out[t] = (float(pre.iloc[-1]), pre.index[-1])
+    return out
+
+
 def _download_aths_full(tickers: Sequence[str]) -> dict:
     return _parse_high(
         with_retry(lambda: yf.download(
@@ -2641,6 +2672,35 @@ class DataStore:
         except Exception as exc:
             stt.errors["_fetch"] = f"{type(exc).__name__}: {exc}"
             return None
+    def _fetch_premarket(self, day_key: str) -> Optional[dict]:
+        stt = self._state("premarket")
+        try:
+            t0 = time.perf_counter()
+            raw = _download_premarket()
+            self.cache.put(f"premarket-{day_key}", raw)
+            stt.seconds = round(time.perf_counter() - t0, 2)
+            stt.fetched, stt.stale, stt.n = True, False, len(raw)
+            return raw
+        except Exception as exc:
+            stt.errors["_fetch"] = f"{type(exc).__name__}: {exc}"
+            return None
+
+    def premarket(self, day_key: str, wait: bool = True) -> dict:
+        """{ticker: (premarket_price, ts)}. ~5-min TTL while premarket is open
+        (04:00-09:30 ET weekdays), 30 min otherwise."""
+        stt, key = self._state("premarket"), f"premarket-{day_key}"
+        now = pd.Timestamp.now(tz=MARKET_TZ)
+        in_pre = now.weekday() < 5 and 4 * 60 <= now.hour * 60 + now.minute < 9 * 60 + 30
+        ttl = PREMARKET_TTL_S if in_pre else 30 * 60
+        raw = self.cache.get(key, max_age_s=ttl)
+        if raw is None and not self.offline:
+            raw = self._run(key, lambda: self._fetch_premarket(day_key), wait=wait)
+        if raw is None:
+            raw = self.cache.get(key, max_age_s=None)
+            if raw is not None:
+                stt.stale, stt.note = True, "serving last cached premarket"
+        return {t: (float(p), pd.Timestamp(ts)) for t, (p, ts) in (raw or {}).items()}
+
     def overview(self, day_key: str, wait: bool = True) -> dict:
         stt, key = self._state("overview"), f"overview-{day_key}"
         bundle = self.cache.get(key, max_age_s=OVERVIEW_TTL_S)
@@ -2675,6 +2735,8 @@ class DataStore:
             self._start("ath-state", self._fetch_aths)
         if self.cache.get(f"overview-{day_key}", OVERVIEW_TTL_S) is None:
             self._start(f"overview-{day_key}", lambda: self._fetch_overview(day_key))
+        if self.cache.get(f"premarket-{day_key}", 30 * 60) is None:
+            self._start(f"premarket-{day_key}", lambda: self._fetch_premarket(day_key))
         if self.cache.get("crypto-spot", CRYPTO_TTL_S) is None:
             self._start("crypto-spot", self._fetch_crypto)
     def pending(self) -> list[str]:
@@ -2688,7 +2750,7 @@ class DataStore:
     def status_line(self) -> str:
         bits = []
         inflight = set(self.pending())
-        for name in ("quotes", "ath", "fundamentals", "overview", "crypto"):
+        for name in ("quotes", "ath", "fundamentals", "overview", "crypto", "premarket"):
             s = self.states.get(name)
             if not s:
                 continue
@@ -3709,6 +3771,91 @@ def render_lm_studio_box() -> None:
         st.rerun()
 
 
+def render_premarket_tab(premarket: dict, quotes: dict, near_pct: float) -> None:
+    """[PREMARKET TAB] premarket prints with gap vs the previous close, the
+    zone AT the premarket price, a 'gapping into buy range' callout and a
+    big-movers list. Sorted by |gap|, biggest first."""
+    st.subheader("🌅 Premarket")
+    _how_to_box("How to use Premarket", [
+        "Premarket prints (04:00–09:30 ET weekdays) with the gap vs the previous close.",
+        "Zone colours are computed AT the premarket price — a gap-down INTO the buying "
+        "range is the actionable premarket list (GREEN / ALL CAPS).",
+        "Liquidity is thin before the open — treat premarket levels as indications, "
+        "not fills. Big movers (|gap| ≥ 3%) are listed above the table.",
+    ])
+    now = pd.Timestamp.now(tz=MARKET_TZ)
+    in_pre = now.weekday() < 5 and 4 * 60 <= now.hour * 60 + now.minute < 9 * 60 + 30
+    latest = max((ts for _, ts in premarket.values()), default=None)
+    if in_pre:
+        st.success(f"🔴 PREMARKET OPEN (04:00–09:30 ET) — {len(premarket)} names printing; "
+                   f"~5 min refresh."
+                   + (f" Last print {latest.strftime('%H:%M')} ET." if latest is not None else ""))
+    else:
+        st.info("🌙 Premarket is closed (04:00–09:30 ET weekdays) — showing the most "
+                "recent premarket prints.")
+    if not premarket:
+        st.caption("No premarket prints available yet.")
+        return
+    entries = []
+    for t, (pre_px, pre_ts) in premarket.items():
+        s = BY_TICKER.get(t)
+        if s is None:
+            continue
+        q = quotes.get(t)
+        prev_close = q[1] if q else None
+        gap = (pre_px / prev_close - 1.0) if (prev_close and pre_px) else None
+        entries.append((t, s, pre_px, pre_ts, prev_close, gap, zone_of(pre_px, s, near_pct)))
+    entries.sort(key=lambda e: (-(abs(e[5]) if e[5] is not None else 0.0), e[0]))
+    into_buy = [e for e in entries if e[6] == ZONE_BUY]
+    into_trim = [e for e in entries if e[6] == ZONE_TRIM]
+    movers = [e for e in entries if e[5] is not None and abs(e[5]) >= 0.03]
+    if into_buy or into_trim or movers:
+        bits = []
+        if into_buy:
+            bits.append("<span style='color:#00E676;font-weight:600;'>🟢 Gapping into buy "
+                        "range (" + str(len(into_buy)) + "):</span> <span style='font-family:"
+                        "monospace;color:#00E676;'>" + " ".join(_e(e[0]) for e in into_buy) + "</span>")
+        if into_trim:
+            bits.append("<span style='color:#FF5252;font-weight:600;'>🔴 At/above trim at "
+                        "premarket (" + str(len(into_trim)) + "):</span> <span style='font-family:"
+                        "monospace;color:#FF5252;'>" + " ".join(_e(e[0]) for e in into_trim) + "</span>")
+        if movers:
+            movers_txt = ", ".join(f"{_e(e[0])} {e[5] * 100:+.1f}%" for e in movers)
+            bits.append("<span style='color:#FFD54F;font-weight:600;'>⚡ Big movers "
+                        "(|gap| ≥ 3%):</span> <span style='font-family:monospace;color:#FFD54F;'>"
+                        + movers_txt + "</span>")
+        st.markdown("<div style='border:1px solid #263238;border-radius:8px;padding:8px 12px;"
+                    "margin-bottom:12px;font-size:14px;line-height:1.6;'>"
+                    + "<br>".join(bits) + "</div>", unsafe_allow_html=True)
+    rows = []
+    for t, s, pre_px, pre_ts, prev_close, gap, zone in entries:
+        color = ZONE_COLORS.get(zone, "#9E9E9E")
+        name = display_name(s, zone)
+        gap_txt = "—" if gap is None else f"{gap * 100:+.2f}%"
+        gap_color = ("#00E676" if (gap or 0) > 0 else ("#FF5252" if gap is not None else "#546E7A"))
+        rows.append(
+            "<tr style='border-bottom:1px solid #263238;'>"
+            f"<td style='padding:5px 8px;font-family:monospace;color:#B0BEC5;'>{_e(t)}</td>"
+            f"<td style='padding:5px 8px;color:{color};font-weight:600;'>{_e(name)}</td>"
+            f"<td style='padding:5px 8px;color:{color};'>{fmt_money(pre_px)}</td>"
+            f"<td style='padding:5px 8px;color:{gap_color};'>{gap_txt}</td>"
+            f"<td style='padding:5px 8px;color:#B0BEC5;'>{fmt_money(prev_close) if prev_close else '—'}</td>"
+            f"<td style='padding:5px 8px;color:{color};font-weight:600;'>{_e(status_text(s, zone, pre_px, near_pct))}</td>"
+            f"<td style='padding:5px 8px;color:#B0BEC5;'>{_e(fmt_range(s))}</td>"
+            f"<td style='padding:5px 8px;color:#B0BEC5;'>{_e(fmt_money(s['trim']) if s.get('trim') else '—')}</td>"
+            f"<td style='padding:5px 8px;color:#546E7A;font-size:13px;'>{pre_ts.strftime('%H:%M')}</td></tr>")
+    st.markdown(
+        "<table style='width:100%;border-collapse:collapse;font-size:15.5px;'>"
+        "<tr style='color:#78909C;text-align:left;border-bottom:1px solid #37474F;'>"
+        "<th style='padding:4px 8px;'>Ticker</th><th>Company</th><th>Premarket</th>"
+        "<th>Gap %</th><th>Prev Close</th><th>Status @ Pre</th><th>Buying Range</th>"
+        "<th>Trim ≥</th><th>Print</th></tr>" + "".join(rows) + "</table>",
+        unsafe_allow_html=True)
+    no_print = len(ALL_TICKERS) - len(entries)
+    st.caption(f"{len(entries)} names with premarket prints • {no_print} not yet printing • "
+               "premarket levels are indications, not fills • zone computed at the premarket price.")
+
+
 def render_article_tab(quotes: dict, zones: dict, near_pct: float) -> None:
     """[LATEST ARTICLE TAB] highlighted stocks at the top, full article text
     as-is below, then the LM Studio question box."""
@@ -3881,6 +4028,7 @@ def main():
     quotes = store.quotes(slot_key)
     aths = store.aths()
     funds, metrics_map = store.fundamentals(day_key)
+    premarket = store.premarket(day_key)
     market_open = _is_trading_day(now) and 9 * 60 + 30 <= now.hour * 60 + now.minute < 16 * 60
     if market_open:
         st.success(f"🔴 Snapshot {slot.strftime('%H:%M')} ET — prices update 09:30 / 12:00 / 16:00 ET; "
@@ -3906,9 +4054,10 @@ def main():
     # getattr fallbacks keep a half-upgraded cached store from crashing the app.
     overview = store.overview(day_key) if hasattr(store, "overview") else {}
     crypto_spot = store.crypto_spot() if hasattr(store, "crypto_spot") else {}
-    (tab_monitor, tab_article, tab_overview, tab_crypto, tab_egf,
+    (tab_monitor, tab_pre, tab_article, tab_overview, tab_crypto, tab_egf,
      tab_fund, tab_big, tab_rules) = st.tabs([
         "📈 Monitor",
+        "🌅 Premarket",
         "📰 Latest Article",
         "🌐 Market Overview",
         "🪙 Crypto",
@@ -3973,6 +4122,9 @@ def main():
             st.markdown(CRYPTO_REFERENCE)
             if missing:
                 st.caption("No data (check ticker on Yahoo Finance): " + ", ".join(missing))
+    with tab_pre:
+        render_premarket_tab(premarket, quotes, near_pct)
+
     with tab_article:
         render_article_tab(quotes, zones, near_pct)
 
