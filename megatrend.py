@@ -103,6 +103,12 @@ VERSION 3 CHANGES
 Run:  pip install yfinance streamlit  &&  streamlit run ai_stocks_monitor.py
 """
 from __future__ import annotations
+
+import sys as _sys
+from pathlib import Path as _Path
+for _p in (_Path(__file__).resolve().parent, _Path.cwd()):
+    if (_p / "market_dashboard").is_dir() and str(_p) not in _sys.path:
+        _sys.path.insert(0, str(_p))
 import hashlib
 import html
 import json
@@ -3947,7 +3953,7 @@ def render_rules_tab():
 # @st.cache_resource keeps the live instance across reruns AND across code
 # pushes on Cloud until the process restarts — an old instance missing new
 # methods (e.g. overview / crypto_spot added in v3) raises AttributeError.
-STORE_VERSION = "v4.2-premarket"
+STORE_VERSION = "v4.3-market-oracle"
 # The public API a cached DataStore instance MUST expose. Derived from the
 # class itself so that adding a method in a future version automatically
 # makes stale (pre-deploy) instances fail this check and get rebuilt.
@@ -3975,6 +3981,211 @@ def _get_store() -> DataStore:
             pass
         store = _store(STORE_VERSION)
     return store
+def render_market_oracle_tab() -> None:
+    """Fail-closed Market Oracle: real Yahoo + FRED → scorecard → audited report."""
+    st.subheader("🧿 Market Oracle")
+    _how_to_box("How to use this tab", [
+        "This is a transparent market-REGIME scorecard (0–100), not an S&P price target and not a trade ticket.",
+        "Press Run to pull live Yahoo ETF adjusted dailies + FRED macro (requires FRED_API_KEY in the environment).",
+        "If any required series is missing/stale/short, the run FAILS CLOSED — no score, no bullish/bearish label.",
+        "Read component scores (trend, breadth, rates, credit, vol, leadership) before the headline regime.",
+        "Use confirmation / invalidation conditions as a checklist — not as a prediction.",
+    ])
+
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        st.caption(
+            "Sources: Yahoo Finance (adjusted ETF dailies) · FRED "
+            "(DGS10/DGS2/DGS3MO, HY/IG OAS, NFCI, DTWEXBGS, VIXCLS, ICSA). "
+            "No simulated, forward-filled, or hardcoded live values."
+        )
+    with col_b:
+        run = st.button("▶ Run Market Oracle", type="primary", key="mo_run")
+
+    import os
+    import json as _json
+    key_set = bool(os.environ.get("FRED_API_KEY") or os.environ.get("FRED_KEY"))
+    if not key_set:
+        st.warning(
+            "FRED_API_KEY is not set in this environment. "
+            "Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html "
+            "then set it before running (export FRED_API_KEY=… or Streamlit secrets)."
+        )
+
+    out_dir = Path(os.environ.get(
+        "MARKET_ORACLE_OUTPUT",
+        Path.home() / ".cache" / "ai_portfolio" / "market_oracle",
+    ))
+    report_path = out_dir / "market_report.json"
+    md_path = out_dir / "market_report.md"
+
+    doc = None
+    if run:
+        with st.spinner("Fetching Yahoo + FRED and validating (fail-closed)…"):
+            try:
+                from market_dashboard.main import run as mo_run
+                doc = mo_run(out_dir=out_dir)
+            except Exception as exc:
+                st.error(f"Market Oracle crashed: {type(exc).__name__}: {exc}")
+                st.stop()
+    elif report_path.exists():
+        try:
+            doc = _json.loads(report_path.read_text(encoding="utf-8"))
+            st.caption(f"Showing last report on disk · {report_path}")
+        except Exception:
+            doc = None
+
+    if not doc:
+        st.info("No report yet. Click **Run Market Oracle** after setting FRED_API_KEY.")
+        return
+
+    status = doc.get("status")
+    if status != "OK":
+        st.error("DATA_VALIDATION_FAILED — no regime or score produced.")
+        for c in doc.get("failed_checks") or []:
+            st.markdown(f"- {_e(c)}")
+        st.code(_json.dumps(doc, indent=2)[:4000], language="json")
+        return
+
+    mr = doc.get("market_regime") or {}
+    label = str(mr.get("label", ""))
+    score = mr.get("score")
+    conf = mr.get("confidence", "")
+    color = (
+        "#00E676" if "BULLISH" in label
+        else ("#FF5252" if "DEFENSIVE" in label or "RISK_OFF" in label else "#FFD54F")
+    )
+    st.markdown(
+        f"<div style='border:2px solid {color};border-radius:12px;padding:14px 18px;"
+        f"background:rgba(255,255,255,0.03);margin-bottom:12px;'>"
+        f"<div style='font-size:13px;color:#90CAF9;'>As of {_e(doc.get('market_data_as_of'))} · "
+        f"generated {_e(doc.get('report_timestamp_et'))}</div>"
+        f"<div style='font-size:28px;font-weight:800;color:{color};margin-top:4px;'>"
+        f"{_e(label.replace('_', ' '))} — {_e(score)}/100</div>"
+        f"<div style='color:#B0BEC5;'>Confidence: <b>{_e(conf)}</b> — {_e(mr.get('confidence_reason'))}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("##### Component scores (exact rules triggered)")
+    cs = doc.get("component_scores") or {}
+    rows = []
+    for name, c in cs.items():
+        if not isinstance(c, dict):
+            continue
+        rules = "; ".join(c.get("rules_triggered") or [])
+        rows.append(
+            "<tr>"
+            + _cell(_e(name), "tk")
+            + _cell(_e(f"{c.get('points')}/{c.get('max_points')}"))
+            + _cell(_e(rules))
+            + "</tr>"
+        )
+    th = "".join(f"<th>{_e(h)}</th>" for h in ["Component", "Points", "Rules triggered"])
+    st.markdown(
+        TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>" + "".join(rows) + "</table>",
+        unsafe_allow_html=True,
+    )
+
+    km = doc.get("key_metrics") or {}
+    st.markdown("##### Key metrics")
+
+    def _g(k, fmt="num"):
+        v = km.get(k)
+        if v is None:
+            return DASH
+        if fmt == "pct":
+            return f"{v * 100:+.2f}%"
+        if fmt == "bps":
+            return f"{v:+.1f} bps"
+        return f"{v:.4g}" if isinstance(v, float) else str(v)
+
+    mrows = [
+        ("10Y yield (DGS10)", f"{_g('dgs10')}% · 20D {_g('dgs10_chg_20_bps', 'bps')} · as of {km.get('dgs10_date', DASH)}"),
+        ("HY OAS", f"{_g('hy_oas')} · 20D {_g('hy_chg_20_bps', 'bps')} · as of {km.get('hy_date', DASH)}"),
+        ("VIX (VIXCLS)", f"{_g('vix')} · 20D {_g('vix_chg_20_pct', 'pct')} · as of {km.get('vix_date', DASH)}"),
+        ("NFCI", f"{_g('nfci')} · rising={km.get('nfci_rising')} · as of {km.get('nfci_date', DASH)}"),
+        ("USD broad (DTWEXBGS)", f"{_g('dtwexbgs')} · 20D {_g('dtwexbgs_chg_20_pct', 'pct')}"),
+        ("RSP/SPY RS 20D", _g("rs_RSP_SPY", "pct")),
+        ("IWM/SPY RS 20D", _g("rs_IWM_SPY", "pct")),
+        ("XLY/XLP RS 20D", _g("rs_XLY_XLP", "pct")),
+        ("XLK/SPY RS 20D", _g("rs_XLK_SPY", "pct")),
+    ]
+    st.markdown(
+        TABLE_CSS + "<table class='pm tight'>" + "".join(
+            f"<tr><td style='width:220px;color:#90CAF9;font-weight:600;'>{_e(k)}</td>"
+            f"<td>{_e(v)}</td></tr>" for k, v in mrows
+        ) + "</table>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("##### Trend states (daily)")
+    ts = doc.get("trend_states") or {}
+    trows = []
+    for sym in ("SPY", "QQQ", "IWM", "RSP", "XLK", "XLF", "XLY", "XLP", "TLT", "HYG"):
+        ind = ts.get(sym) or {}
+        if not ind:
+            continue
+        trows.append(
+            "<tr>"
+            + _cell(_e(sym), "tk")
+            + _cell(_e(ind.get("trend_daily")))
+            + _cell(_e(f"{ind.get('last_close'):.2f}" if ind.get("last_close") is not None else DASH))
+            + _cell(_e(f"{ind.get('distance_to_50d_pct'):+.2f}%" if ind.get("distance_to_50d_pct") is not None else DASH))
+            + _cell(_e(f"{ind.get('distance_to_200d_pct'):+.2f}%" if ind.get("distance_to_200d_pct") is not None else DASH))
+            + _cell(_e(f"{ind.get('rsi_14'):.1f}" if ind.get("rsi_14") is not None else DASH))
+            + "</tr>"
+        )
+    th = "".join(f"<th>{_e(h)}</th>" for h in ["Ticker", "Trend", "Close", "% vs 50D", "% vs 200D", "RSI14"])
+    st.markdown(
+        TABLE_CSS + "<table class='pm tight'><tr>" + th + "</tr>" + "".join(trows) + "</table>",
+        unsafe_allow_html=True,
+    )
+
+    warns = doc.get("warnings") or []
+    if warns:
+        st.markdown("##### Warnings")
+        for w in warns:
+            st.markdown(f"- ⚠️ {_e(w)}")
+
+    st.markdown("##### Three-month roadmap (conditional — not a price target)")
+    st.markdown(f"**Base case:** {_e(doc.get('base_case_1_to_3_months'))}")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**Bullish confirmation**")
+        for x in doc.get("bullish_confirmation") or []:
+            st.markdown(f"- {_e(x)}")
+    with c2:
+        st.markdown("**Bearish confirmation**")
+        for x in doc.get("bearish_confirmation") or []:
+            st.markdown(f"- {_e(x)}")
+    with c3:
+        st.markdown("**Invalidated if**")
+        for x in doc.get("invalidation_conditions") or []:
+            st.markdown(f"- {_e(x)}")
+
+    st.markdown(
+        f"**Action posture:** `{_e(doc.get('action_posture', 'neutral'))}` — "
+        "sizing / risk posture only, not a buy or sell instruction."
+    )
+
+    with st.expander("Data audit (every source, observation date, retrieval time)"):
+        for src_row in doc.get("data_sources") or []:
+            if isinstance(src_row, dict):
+                st.markdown(
+                    f"- `{_e(src_row.get('symbol'))}` · {_e(src_row.get('source'))} · "
+                    f"obs_end={_e(src_row.get('observation_end'))} · "
+                    f"retrieved={_e(src_row.get('retrieved_at_et'))} · "
+                    f"rows={_e(src_row.get('rows'))} · adj={_e(src_row.get('adjustment'))}"
+                )
+        st.caption(f"JSON: {report_path}  ·  Markdown: {md_path}")
+
+    if md_path.exists():
+        with st.expander("Full Markdown report"):
+            st.markdown(md_path.read_text(encoding="utf-8"))
+
+
+
 def main():
     st.set_page_config(page_title="AI Portfolio", layout="wide")
     inject_theme()
@@ -4065,12 +4276,13 @@ def main():
     # getattr fallbacks keep a half-upgraded cached store from crashing the app.
     overview = store.overview(day_key) if hasattr(store, "overview") else {}
     crypto_spot = store.crypto_spot() if hasattr(store, "crypto_spot") else {}
-    (tab_monitor, tab_pre, tab_article, tab_overview, tab_crypto, tab_egf,
+    (tab_monitor, tab_pre, tab_article, tab_overview, tab_oracle, tab_crypto, tab_egf,
      tab_fund, tab_big, tab_rules) = st.tabs([
         "📈 Monitor",
         "🌅 Premarket",
         "📰 Latest Article",
         "🌐 Market Overview",
+        "🧿 Market Oracle",
         "🪙 Crypto",
         "📈 EGF",
         "🔬 Fundamentals",
@@ -4141,6 +4353,8 @@ def main():
 
     with tab_overview:
         render_market_overview_tab(overview, quotes, zones, metrics_map, near_pct)
+    with tab_oracle:
+        render_market_oracle_tab()
     with tab_crypto:
         render_crypto_tab(crypto_spot, quotes, zones)
     with tab_egf:
