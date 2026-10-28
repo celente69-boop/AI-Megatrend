@@ -1,11 +1,18 @@
 """
-Nadeem Walayat AI Portfolio Monitor - buying ranges & trim levels  (OPTIMIZED)
-Streamlit app powered by yfinance (REAL market data - no synthetic fallback).
-WHAT THIS FILE IS
------------------
-A drop-in replacement for `strategy_original.py`. All published levels (10X
-BRIGADE, STOCKS), the rules text, the zone colours and every visible column are
-unchanged; `test_parity.py` asserts that the rendered content is identical.
+Nadeem Walayat Mega Trend Monitor — two-tab edition (28 Oct 2026).
+Streamlit app powered by yfinance (REAL market data — no synthetic fallback).
+CURRENT BUILD
+-------------
+* Exactly two tabs: Monitor and Latest Article. Premarket, market overview,
+  crypto, EGF, fundamentals, big-picture and rules tabs are removed from the UI.
+* The 10X Brigade remains at the top of Monitor; the regular stock list is the
+  user's 28 Oct published-price list, sorted A–Z.
+* One supplied price means BUY at or below that level. Two supplied prices mean
+  a band. NVDA is $170–$190 and FCX is $52–$65. No missing trim/target values
+  are filled in.
+* Latest Article is a short, scannable summary. The full article and its stock
+  list are intentionally omitted; the price list appears only on Monitor.
+* Quotes and fundamentals use live Yahoo data. Missing values remain em-dashes.
 WHAT CHANGED AND WHY (measured on live Yahoo, 83 monitored tickers)
 -------------------------------------------------------------------
 Original cold-start cost, measured:
@@ -35,9 +42,8 @@ Fixes here:
   * HTML uses CSS classes instead of ~1,079 repeated inline style strings
     (70.8 KB -> ~30 KB per monitor table, sent to the browser every rerun).
   * `html.escape` on every interpolated value (the original was injectable).
-Zone thresholds, colours and wording kept. Level data updated only where the
-25 Aug sheet / Briefs published a number that was previously blank. Tab layout
-expanded in v3 (Market Overview, Crypto, EGF, Big Picture).
+Zone thresholds and live quote logic retained. The 28 Oct 2026 update replaces
+only the regular stock list and visible tab layout requested by the user.
 VERSION 2 CHANGES (requested after review)
 -----------------------------------------
   * MPW and RDFN dropped from the monitored book. Both are delisted — Yahoo
@@ -100,7 +106,7 @@ VERSION 3 CHANGES
   * FIX: Streamlit Cloud AttributeError on store.overview — cache_resource was
     keeping a pre-v3 DataStore instance after deploy. STORE_VERSION cache key +
     self-heal in _get_store() + Refresh clears the resource cache.
-Run:  pip install yfinance streamlit  &&  streamlit run ai_stocks_monitor.py
+Run:  pip install yfinance streamlit  &&  streamlit run megatrend.py
 """
 from __future__ import annotations
 import hashlib
@@ -287,21 +293,21 @@ BRIGADE = [
     dict(
         t='NVO',
         name='Novo Nordisk',
-        buy_lo=35.0,
-        buy_hi=48.0,
+        buy_lo=None,
+        buy_hi=36.0,
         target='250',
-        note='[TW 11 Aug] in buying range; exposure 58%.',
+        note='[28 Oct 2026 article] buy at/below $36; 10-year target retained.',
     ),
-    dict(t='PATH', name='PATH', buy_lo=8.0, buy_hi=12.0, target='120', note='[TW 18 Aug] small sell.'),
-    dict(t='QBTS', name='QBTS', buy_lo=4.0, buy_hi=8.0, target='98'),
+    dict(t='PATH', name='PATH', buy_lo=None, buy_hi=10.0, target='120', note='[28 Oct 2026 article] buy at/below $10; 10-year target retained.'),
+    dict(t='QBTS', name='QBTS', buy_lo=None, buy_hi=4.5, target='98', note='[28 Oct 2026 article] buy at/below $4.50; 10-year target retained.'),
     dict(t='SMCI', name='SMCI', buy_lo=18.0, buy_hi=24.0, target='240', note='Exposure 19%.'),
     dict(
         t='VEEV',
         name='Veeva',
-        buy_lo=138.0,
-        buy_hi=166.0,
+        buy_lo=None,
+        buy_hi=180.0,
         target='1000',
-        note='[TW] big sell 8% + trims; exposure 90%.',
+        note='[28 Oct 2026 article] buy at/below $180; 10-year target retained.',
     ),
 ]
 BRIGADE_NOTE = ("Special section from the 17 Jul 2026 '10x Stocks to Accumulate' article • "
@@ -309,534 +315,82 @@ BRIGADE_NOTE = ("Special section from the 17 Jul 2026 '10x Stocks to Accumulate'
                 "(GREEN = in buying range, WHITE = within 10% of the top). "
                 "Sorted A–Z by ticker.")
 # =============================================================================
-# MAIN LIST — portfolio sheet + article + briefs. Sorted A–Z by ticker (v3).
-# Missing buy/trim filled ONLY from published 25 Aug sheet / Stocks Briefs.
-# Brigade tickers are NOT repeated here. `note` = provenance, not rendered.
+# MAIN LIST — 28 Oct 2026 user-supplied buy levels, sorted A–Z by ticker.
+# Four tickers already in the retained 10X Brigade are updated there, not repeated.
 # =============================================================================
+# 28 Oct 2026 user-supplied levels. A single price is a buy-at-or-below
+# trigger; where two prices were supplied, they form the published buy band.
+# Missing trim and target values stay blank. 10X overlaps remain in BRIGADE.
 STOCKS = [
-    dict(
-        t='AAPL',
-        name='Apple',
-        buy_lo=190.0,
-        buy_hi=226.0,
-        trim=310.0,
-        mech='Within 10% of High',
-        section='Secondary',
-    ),
-    dict(
-        t='ABBV',
-        name='AbbVie',
-        buy_lo=155.0,
-        buy_hi=167.0,
-        trim=241.0,
-        mech='Within 10% of High',
-        section='Healthcare',
-    ),
-    dict(
-        t='ADSK',
-        name='Autodesk',
-        buy_lo=186.0,
-        buy_hi=202.0,
-        trim=310.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-    dict(t="AEHR", name="AEHR", buy_lo=None, buy_hi=73.7, trim=132.66, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $147.40 (2026-08-14). Buy top = 50% off ATH; trim = within 10% of ATH."),
-    dict(
-        t='ALB',
-        name='Albemarle',
-        buy_lo=60.0,
-        buy_hi=90.0,
-        trim=230.0,
-        mech='$206',
-        section='Climate',
-        note='[Sheet 25 Aug] buy $60–$90, trim $230.',
-    ),
-    dict(
-        t='AMAT',
-        name='AMAT',
-        buy_lo=220.0,
-        buy_hi=324.0,
-        trim=703.0,
-        mech='Within 5% of High',
-        section='Secondary',
-        note='[A 8 Sep] range nudged higher to $324–$220; small buys at $380 (support); '
-             '12m $600–$650. Sheet still shows $202–$276.',
-    ),
-    dict(
-        t='AMD',
-        name='AMD',
-        buy_lo=180.0,
-        buy_hi=260.0,
-        trim=585.0,
-        mech='Only at ATH',
-        target='600',
-        section='Primary',
-        note='[Sheet 8 Sep] buy $180–$260. [A] dream drop $200; 2x off sub-$300 buys.',
-    ),
-    dict(t="AMT", name="American Tower", buy_lo=None, buy_hi=151.86, trim=273.35, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $303.72 (2021-09-08). Buy top = 50% off ATH; trim = within 10% of ATH."),
-    dict(
-        t='AMZN',
-        name='Amazon',
-        buy_lo=152.0,
-        buy_hi=201.0,
-        trim=258.0,
-        mech='Within 10% of High',
-        section='Secondary',
-        note='[A 8 Sep] light adds at $229, main buys from $201; 12m >$300 (new ATH).',
-    ),
-    dict(
-        t='ARW',
-        name='Arrow Electronics',
-        buy_lo=106.0,
-        buy_hi=132.0,
-        trim=214.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-    dict(
-        t='ASML',
-        name='ASML',
-        buy_lo=1000.0,
-        buy_hi=1326.0,
-        trim=1900.0,
-        mech='Within 5% of High',
-        target='>2150',
-        section='Primary',
-        note='[A] 1300 then getting-lucky 1000.',
-    ),
-    dict(
-        t='AVGO',
-        name='Broadcom',
-        buy_lo=272.0,
-        buy_hi=336.0,
-        trim=495.0,
-        mech='Only at ATH',
-        target='470–500+',
-        section='Primary',
-        note='[A] support $355 — break targets $300/$288. [CSV] trim ATH 495.',
-    ),
-    dict(t='BABA', name='Alibaba', buy_lo=84.0, buy_hi=106.0, trim=None, section='High Risk'),
-    dict(
-        t='BHP',
-        name='BHP',
-        buy_lo=54.0,
-        buy_hi=64.0,
-        trim=89.0,
-        mech='Within 10% of High',
-        section='Climate',
-        note='[Sheet 25 Aug] buy $54–$64, trim $89.',
-    ),
-    dict(
-        t='BIDU',
-        name='Baidu',
-        buy_lo=88.0,
-        buy_hi=108.0,
-        trim=None,
-        section='Medium Risk',
-        note="[A] 'buy the dumps such as BIDU'; 18 Aug mega buys to $88.",
-    ),
-    dict(t="BKNG", name="Booking", buy_lo=None, buy_hi=116.79, trim=210.22, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $233.58 (2025-07-08). Buy top = 50% off ATH; trim = within 10% of ATH."),
-    dict(
-        t='CCJ',
-        name='Cameco',
-        buy_lo=70.0,
-        buy_hi=82.0,
-        trim=122.0,
-        mech='Within 10% of High',
-        section='Climate',
-        note='[Sheet 25 Aug] buy $70–$82, trim $122.',
-    ),
-    dict(
-        t='COIN',
-        name='Coinbase',
-        buy_lo=112.0,
-        buy_hi=148.0,
-        trim=232.0,
-        mech='$211–232',
-        section='Crypto Equity',
-    ),
-    dict(t='CRSP', name='CRISPR', buy_lo=34.0, buy_hi=41.0, trim=None, section='High Risk'),
-    dict(
-        t='CRUS',
-        name='Cirrus Logic',
-        buy_lo=98.0,
-        buy_hi=126.0,
-        trim=162.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-    dict(t='CSGP', name='CoStar', buy_lo=28.0, buy_hi=33.6, trim=None, section='High Risk'),
-    dict(
-        t='DIOD',
-        name='Diodes',
-        buy_lo=42.0,
-        buy_hi=66.0,
-        trim=113.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-    dict(t='DOCU', name='Docusign', buy_lo=40.0, buy_hi=45.0, trim=None, section='High Risk'),
-    dict(
-        t='FCX',
-        name='Freeport-McMoRan',
-        buy_lo=34.0,
-        buy_hi=50.0,
-        trim=72.0,
-        mech='Within 10% of High',
-        section='Climate',
-        note='[Sheet 25 Aug] buy $34–$50, trim $72. [B] accum sub $50.',
-    ),
-    dict(
-        t='FLEX',
-        name='FLEX',
-        buy_lo=42.0,
-        buy_hi=70.0,
-        trim=150.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-    dict(
-        t='FOR',
-        name='Forestar',
-        buy_lo=15.0,
-        buy_hi=20.0,
-        trim=37.0,
-        mech='Within 10% of High',
-        section='Housing',
-    ),
-    dict(
-        t='FSLR',
-        name='First Solar',
-        buy_lo=144.0,
-        buy_hi=192.0,
-        trim=305.0,
-        mech='Within 5% of High',
-        section='Climate',
-        note='[Sheet 25 Aug] buy $144–$192, trim $305.',
-    ),
-    dict(
-        t='GFS',
-        name='GlobalFoundries',
-        buy_lo=32.0,
-        buy_hi=48.0,
-        trim=83.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-    dict(
-        t='GOOG',
-        name='Google',
-        buy_lo=228.0,
-        buy_hi=292.0,
-        trim=404.0,
-        mech='Only at ATH',
-        target='430',
-        section='Primary',
-        note='[Sheet 8 Sep] buy $228–$292. [A] support 332 — break targets 300/272/240.',
-    ),
-    dict(t='GPN', name='GPN', buy_lo=62.0, buy_hi=68.0, trim=None, section='Medium Risk'),
-    dict(t="GSK", name="GSK", buy_lo=None, buy_hi=38.09, trim=68.57, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $76.19 (1999-01-08). Buy top = 50% off ATH; trim = within 10% of ATH."),
-    dict(t='HPQ', name='HP', buy_lo=16.0, buy_hi=18.6, trim=30.0, mech='$28–30', section='Medium Risk',
-         note='[Sheet 8 Sep] trim ladder $28–$30.'),
-    dict(
-        t='IBM',
-        name='IBM',
-        buy_lo=168.0,
-        buy_hi=208.0,
-        trim=299.0,
-        mech='Within 10% of High',
-        section='Secondary',
-        note='[A 8 Sep] rebought in the $208–$168 range after selling the $330 fomo pump; '
-             '12m ~$280; $235 is not cheap.',
-    ),
-    dict(t='IIPR', name='IIPR', buy_lo=38.0, buy_hi=44.0, trim=None, section='Housing'),
-    dict(t='INMD', name='InMode', buy_lo=12.0, buy_hi=14.0, trim=None, section='Medium Risk'),
-    dict(
-        t='INTC',
-        name='Intel',
-        buy_lo=28.0,
-        buy_hi=60.0,
-        trim=135.0,
-        mech='Within 5% of High',
-        section='Secondary',
-    ),
-    dict(
-        t='JBL',
-        name='Jabil',
-        buy_lo=180.0,
-        buy_hi=238.0,
-        trim=386.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-    dict(
-        t='JNJ',
-        name='JnJ',
-        buy_lo=154.0,
-        buy_hi=182.0,
-        trim=253.0,
-        mech='Within 10% of High',
-        section='Healthcare',
-    ),
-    dict(
-        t='KLAC',
-        name='KLAC',
-        buy_lo=90.0,
-        buy_hi=132.0,
-        trim=292.0,
-        mech='Within 5% of High',
-        section='Secondary',
-        note='[A 8 Sep] range UNCHANGED (still expensive at $132); added some at $168; '
-             '12m $235–$245.',
-    ),
-    dict(
-        t='LMT',
-        name='Lockheed Martin',
-        buy_lo=422.0,
-        buy_hi=458.0,
-        trim=623.0,
-        mech='Within 10% of High',
-        section='Defence',
-    ),
-    dict(
-        t='LOGI',
-        name='Logitech',
-        buy_lo=66.0,
-        buy_hi=86.0,
-        trim=126.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-    dict(
-        t='LULU',
-        name='Lululemon',
-        buy_lo=None,
-        buy_hi=None,
-        trim=170.0,
-        mech=None,
-        section='Article',
-        note='[A 8 Sep] added at ~$102 (down 81% off the high); avg cost $168; next trim '
-             'target $170; earlier buy zone was $160–$200.',
-    ),
-    dict(
-        t='LRCX',
-        name='Lam Research',
-        buy_lo=156.0,
-        buy_hi=226.0,
-        trim=417.0,
-        mech='Within 5% of High',
-        section='Secondary',
-        note='[A 8 Sep] range RAISED to $226–$156 (sheet bottom $150); light adds at $250; '
-             '12m $406–$450.',
-    ),
-    dict(
-        t='META',
-        name='META',
-        buy_lo=448.0,
-        buy_hi=548.0,
-        trim=717.0,
-        mech='Within 10% of High',
-        target='~730',
-        section='Primary',
-        note='[Sheet 8 Sep] buy $448–$548. [A] puke cases below 400 to 360; trim into pumps.',
-    ),
-    dict(t='MGNI', name='Magnite', buy_lo=8.6, buy_hi=11.6, trim=24.0, mech='$20–24', section='High Risk'),
-    dict(t="MRNA", name="Moderna", buy_lo=None, buy_hi=248.74, trim=447.74, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $497.49 (2021-08-10). Buy top = 50% off ATH; trim = within 10% of ATH."),
-    dict(
-        t='MSFT',
-        name='Microsoft',
-        buy_lo=336.0,
-        buy_hi=382.0,
-        trim=500.0,
-        mech='Within 10% of High',
-        target='600',
-        section='Primary',
-        note='[Sheet 8 Sep] buy $336–$382. [A 8 Sep] recent trims; buying opp toward the '
-             'range, below = getting lucky.',
-    ),
-    dict(
-        t='MSTR',
-        name='MicroStrategy',
-        buy_lo=56.0,
-        buy_hi=90.0,
-        trim=182.0,
-        mech='$182–222',
-        section='Crypto Equity',
-        note='[Sheet 25 Aug] buy $56–$90, trim $182/$222. BTC proxy.',
-    ),
-    dict(
-        t='MU',
-        name='Micron',
-        buy_lo=476.0,
-        buy_hi=625.0,
-        trim=1192.0,
-        mech='Within 5% of High',
-        section='Secondary',
-        note='[Sheet 8 Sep] buy $476–$625. [A 8 Sep] holds none; light adds ~$800, support '
-             '$740, target zone $625 (50% off high), lower limits to $450; 12m 2x talk.',
-    ),
-    dict(
-        t='NFLX',
-        name='Netflix',
-        buy_lo=None,
-        buy_hi=70.0,
-        trim=None,
-        mech=None,
-        section='User',
-        note='[User 9 Sep] buy price under $70.',
-    ),
-    dict(
-        t='NVDA',
-        name='NVIDIA',
-        buy_lo=148.0,
-        buy_hi=183.0,
-        trim=237.0,
-        mech='Only at ATH',
-        target='~275',
-        section='Primary',
-        note='[Sheet 8 Sep] buy $148–$183, trim ATH $237. [A 8 Sep] smart money sold into '
-             'earnings; primed for buying opps into the October window.',
-    ),
-    dict(
-        t='ON',
-        name='ON Semiconductor',
-        buy_lo=38.0,
-        buy_hi=62.0,
-        trim=121.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-    dict(
-        t='OXY',
-        name='Occidental',
-        buy_lo=40.0,
-        buy_hi=46.0,
-        trim=64.0,
-        mech='$60',
-        section='Climate',
-        note='[Sheet 25 Aug] buy $40–$46, trim $64. Briefs wider $40–$74 range-trade.',
-    ),
-    dict(t='PFE', name='Pfizer', buy_lo=22.0, buy_hi=24.3, trim=None, section='Healthcare'),
-    dict(
-        t='PINS',
-        name='Pinterest',
-        buy_lo=None,
-        buy_hi=18.0,
-        trim=38.0,
-        mech='$38+',
-        section='Other',
-        note='[B] accumulate sub $18, next pump over $38.',
-    ),
-    dict(
-        t='QCOM',
-        name='Qualcomm',
-        buy_lo=122.0,
-        buy_hi=152.0,
-        trim=220.0,
-        mech='Within 10% of High',
-        section='Secondary',
-        note='[A 8 Sep] re-accumulate $152–$120, trim ~$220 (sheet trim $234); earnings '
-             'contracting — trim the pumps. 12m ~$230 max.',
-    ),
-    dict(t='RBLX', name='Roblox', buy_lo=33.0, buy_hi=41.0, trim=69.0, mech='$60–69', section='High Risk'),
-    dict(
-        t='RTX',
-        name='RTX',
-        buy_lo=116.0,
-        buy_hi=144.0,
-        trim=204.0,
-        mech='Within 10% of High',
-        section='Defence',
-    ),
-    dict(
-        t='SLB',
-        name='SLB',
-        buy_lo=37.0,
-        buy_hi=44.0,
-        trim=60.0,
-        mech='$57',
-        section='Climate',
-        note='[Sheet 25 Aug] buy $37–$44, trim $60. Briefs wider $32–$60.',
-    ),
-    dict(t="SNAP", name="Snap", buy_lo=None, buy_hi=41.67, trim=75.01, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $83.34 (2021-09-24). Buy top = 50% off ATH; trim = within 10% of ATH."),
-    dict(
-        t='SNPS',
-        name='Synopsys',
-        buy_lo=380.0,
-        buy_hi=400.0,
-        trim=500.0,
-        mech='$500+',
-        section='Other',
-        note='[B] range $380–$540; accumulate sub $400, trim over $500.',
-    ),
-    dict(t='SYNA', name='SYNA', buy_lo=46.0, buy_hi=70.0, trim=None, section='High Risk'),
-    dict(t='TAK', name='Takeda', buy_lo=12.0, buy_hi=13.0, trim=None, section='Medium Risk'),
-    dict(
-        t='TCEHY',
-        name='Tencent',
-        buy_lo=40.0,
-        buy_hi=55.0,
-        trim=89.0,
-        mech='Within 10% of High',
-        section='High Risk',
-    ),
-    dict(
-        t='TMO',
-        name='Thermo Fisher',
-        buy_lo=400.0,
-        buy_hi=450.0,
-        trim=None,
-        target='600+',
-        section='Other',
-        note='[B 14 Jun] accumulate $400–$450 for eventual $600+.',
-    ),
-    dict(t="TOELY", name="Tokyo Electron", buy_lo=None, buy_hi=124.68, trim=224.43, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $249.37 (2026-06-29). Buy top = 50% off ATH; trim = within 10% of ATH."),
-    dict(
-        t='TSLA',
-        name='Tesla',
-        buy_lo=172.0,
-        buy_hi=286.0,
-        trim=400.0,
-        mech='Within 10% of High',
-        section='Secondary',
-        note='[A 8 Sep] trim once it breaks above $400 (sheet trim $449); 12m target $450 '
-             'after the bear market bottoms.',
-    ),
-    dict(
-        t='TSM',
-        name='TSMC',
-        buy_lo=222.0,
-        buy_hi=322.0,
-        trim=479.0,
-        mech='Only at ATH',
-        target='>500',
-        section='Primary',
-        note='[Sheet 8 Sep] buy $222–$322; sweet spot ~$330. [A] lightly adding sub 390.',
-    ),
-    dict(t='ULH', name='ULH', buy_lo=12.6, buy_hi=14.6, trim=None, section='Medium Risk'),
-    dict(
-        t='UNH',
-        name='UnitedHealth',
-        buy_lo=234.0,
-        buy_hi=272.0,
-        trim=422.0,
-        mech='$390',
-        section='Healthcare',
-        note='[Sheet 25 Aug] buy $234–$272, trim $422. [B] trim rallies.',
-    ),
-    dict(t="V", name="Visa", buy_lo=None, buy_hi=192.79, trim=347.01, mech="Within 10% of ATH", note="[ATH-derived 30 Aug 2026] Yahoo all-time high $385.57 (2026-08-26). Buy top = 50% off ATH; trim = within 10% of ATH."),
-    dict(
-        t='WDC',
-        name='Western Digital',
-        buy_lo=156.0,
-        buy_hi=252.0,
-        trim=720.0,
-        mech='Within 10% of High',
-        section='Medium Risk',
-    ),
-]
-# =============================================================================
+    dict(t="AAON", name="AAON Inc.", buy_lo=None, buy_hi=63.0, trim=None, target=None),
+    dict(t="AAPL", name="Apple", buy_lo=None, buy_hi=275.0, trim=None, target=None),
+    dict(t="ADSK", name="Autodesk", buy_lo=None, buy_hi=188.0, trim=None, target=None),
+    dict(t="ALB", name="Albemarle", buy_lo=None, buy_hi=51.0, trim=None, target=None),
+    dict(t="AMAT", name="Applied Materials", buy_lo=None, buy_hi=252.0, trim=None, target=None),
+    dict(t="AMD", name="Advanced Micro Devices", buy_lo=None, buy_hi=232.0, trim=None, target=None),
+    dict(t="AMT", name="American Tower", buy_lo=None, buy_hi=160.0, trim=None, target=None),
+    dict(t="AMZN", name="Amazon", buy_lo=None, buy_hi=197.0, trim=None, target=None),
+    dict(t="ARM", name="Arm Holdings", buy_lo=None, buy_hi=113.0, trim=None, target=None),
+    dict(t="ARW", name="Arrow Electronics", buy_lo=None, buy_hi=152.0, trim=None, target=None),
+    dict(t="ASML", name="ASML", buy_lo=None, buy_hi=1250.0, trim=None, target=None),
+    dict(t="AVGO", name="Broadcom", buy_lo=None, buy_hi=286.0, trim=None, target=None),
+    dict(t="BABA", name="Alibaba", buy_lo=None, buy_hi=82.0, trim=None, target=None),
+    dict(t="BIDU", name="Baidu", buy_lo=None, buy_hi=75.0, trim=None, target=None),
+    dict(t="BKNG", name="Booking Holdings", buy_lo=None, buy_hi=136.0, trim=None, target=None),
+    dict(t="CRUS", name="Cirrus Logic", buy_lo=None, buy_hi=96.0, trim=None, target=None),
+    dict(t="DELL", name="Dell Technologies", buy_lo=None, buy_hi=250.0, trim=None, target=None),
+    dict(t="DIOD", name="Diodes Incorporated", buy_lo=None, buy_hi=42.0, trim=None, target=None),
+    dict(t="DOCU", name="DocuSign", buy_lo=None, buy_hi=42.0, trim=None, target=None),
+    dict(t="ELV", name="Elevance Health", buy_lo=None, buy_hi=282.0, trim=None, target=None),
+    dict(t="FCX", name="Freeport-McMoRan", buy_lo=52.0, buy_hi=65.0, trim=None, target=None),
+    dict(t="FLEX", name="Flex Ltd.", buy_lo=None, buy_hi=66.0, trim=None, target=None),
+    dict(t="FOR", name="Forestar Group", buy_lo=None, buy_hi=20.0, trim=None, target=None),
+    dict(t="FSLR", name="First Solar", buy_lo=None, buy_hi=140.0, trim=None, target=None),
+    dict(t="GDDY", name="GoDaddy", buy_lo=None, buy_hi=74.0, trim=None, target=None),
+    dict(t="GFS", name="GlobalFoundries", buy_lo=None, buy_hi=33.0, trim=None, target=None),
+    dict(t="GILD", name="Gilead Sciences", buy_lo=None, buy_hi=122.0, trim=None, target=None),
+    dict(t="GOOG", name="Alphabet", buy_lo=None, buy_hi=252.0, trim=None, target=None),
+    dict(t="GPN", name="Global Payments", buy_lo=None, buy_hi=64.0, trim=None, target=None),
+    dict(t="GSK", name="GSK plc", buy_lo=None, buy_hi=1320.0, trim=None, target=None),
+    dict(t="HUM", name="Humana", buy_lo=None, buy_hi=282.0, trim=None, target=None),
+    dict(t="IBM", name="IBM", buy_lo=None, buy_hi=200.0, trim=None, target=None),
+    dict(t="INTC", name="Intel", buy_lo=None, buy_hi=44.0, trim=None, target=None),
+    dict(t="JBL", name="Jabil", buy_lo=None, buy_hi=236.0, trim=None, target=None),
+    dict(t="KLAC", name="KLA Corporation", buy_lo=None, buy_hi=132.0, trim=None, target=None),
+    dict(t="LMT", name="Lockheed Martin", buy_lo=None, buy_hi=498.0, trim=None, target=None),
+    dict(t="LOGI", name="Logitech", buy_lo=None, buy_hi=86.0, trim=None, target=None),
+    dict(t="LRCX", name="Lam Research", buy_lo=None, buy_hi=198.0, trim=None, target=None),
+    dict(t="META", name="Meta Platforms", buy_lo=None, buy_hi=386.0, trim=None, target=None),
+    dict(t="MGNI", name="Magnite", buy_lo=None, buy_hi=13.0, trim=None, target=None),
+    dict(t="MSFT", name="Microsoft", buy_lo=None, buy_hi=350.0, trim=None, target=None),
+    dict(t="MU", name="Micron Technology", buy_lo=None, buy_hi=320.0, trim=None, target=None),
+    dict(t="NBIS", name="Nebius Group", buy_lo=None, buy_hi=148.0, trim=None, target=None),
+    dict(t="NVDA", name="NVIDIA", buy_lo=170.0, buy_hi=190.0, trim=None, target=None),
+    dict(t="ON", name="ON Semiconductor", buy_lo=None, buy_hi=44.0, trim=None, target=None),
+    dict(t="ORCL", name="Oracle", buy_lo=None, buy_hi=86.0, trim=None, target=None),
+    dict(t="PFE", name="Pfizer", buy_lo=None, buy_hi=23.0, trim=None, target=None),
+    dict(t="PLTR", name="Palantir", buy_lo=None, buy_hi=122.0, trim=None, target=None),
+    dict(t="QCOM", name="Qualcomm", buy_lo=None, buy_hi=122.0, trim=None, target=None),
+    dict(t="RBLX", name="Roblox", buy_lo=None, buy_hi=35.0, trim=None, target=None),
+    dict(t="RGTI", name="Rigetti Computing", buy_lo=None, buy_hi=9.0, trim=None, target=None),
+    dict(t="RKLB", name="Rocket Lab", buy_lo=None, buy_hi=16.0, trim=None, target=None),
+    dict(t="RKT", name="Rocket Companies", buy_lo=None, buy_hi=8.0, trim=None, target=None),
+    dict(t="ROAD", name="Construction Partners", buy_lo=None, buy_hi=66.0, trim=None, target=None),
+    dict(t="RTX", name="RTX Corporation", buy_lo=None, buy_hi=158.0, trim=None, target=None),
+    dict(t="SHOP", name="Shopify", buy_lo=None, buy_hi=125.0, trim=None, target=None),
+    dict(t="SNPS", name="Synopsys", buy_lo=None, buy_hi=371.0, trim=None, target=None),
+    dict(t="SPGI", name="S&P Global", buy_lo=None, buy_hi=386.0, trim=None, target=None),
+    dict(t="SYNA", name="Synaptics", buy_lo=None, buy_hi=65.0, trim=None, target=None),
+    dict(t="TCEHY", name="Tencent", buy_lo=None, buy_hi=45.0, trim=None, target=None),
+    dict(t="TMO", name="Thermo Fisher Scientific", buy_lo=None, buy_hi=440.0, trim=None, target=None),
+    dict(t="TSLA", name="Tesla", buy_lo=None, buy_hi=232.0, trim=None, target=None),
+    dict(t="TSM", name="Taiwan Semiconductor", buy_lo=None, buy_hi=230.0, trim=None, target=None),
+    dict(t="TTWO", name="Take-Two Interactive", buy_lo=None, buy_hi=130.0, trim=None, target=None),
+    dict(t="U", name="Unity Software", buy_lo=None, buy_hi=18.0, trim=None, target=None),
+    dict(t="ULH", name="Universal Logistics Holdings", buy_lo=None, buy_hi=12.0, trim=None, target=None),
+    dict(t="UNH", name="UnitedHealth Group", buy_lo=None, buy_hi=270.0, trim=None, target=None),
+    dict(t="ZS", name="Zscaler", buy_lo=None, buy_hi=65.0, trim=None, target=None),
+]# =============================================================================
 # RULES TO REMEMBER — Investing Guide + Real Secret distilled (unchanged)
 # =============================================================================
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -898,713 +452,26 @@ CRYPTO_REFERENCE = (
 )
 
 # =============================================================================
-# LATEST ARTICLE (8 Sept 2026) — full text stored verbatim for the Article tab
-# and as context for LM Studio questions. Source: latest article.csv export.
+# LATEST ARTICLE (28 Oct 2026) — concise notes only; full text and target list
+# are intentionally omitted because the updated levels are on the Monitor tab.
 # =============================================================================
-ARTICLE_TITLE = 'Bonds Market Crisis to Trigger Stocks, Housing and Crypto Panic Events, Trend Forecasts'
-ARTICLE_DATE = "8 Sept 2026"
-ARTICLE_TEXT = r"""Bonds Market Crisis to Trigger Stocks, Housing and Crypto Panic Events, Trend Forecasts
-
-20 hours ago
-
-Executive Summary: Macro Crisis & Accumulation Strategy
-
-·  Macroeconomic Catalyst: A global bond market crisis, fueled by persistent inflation, massive government debt refinancing, and geopolitical conflicts, will force central banks including the US Federal Reserve to hike interest rates, shattering the mainstream consensus of impending rate cuts.
-
-·  Equities Outlook: The S&P 500's current strength is a "nothing burger" propped up by an unsustainable AI capex bubble . A severe market correction is anticipated, with the S&P 500 forecast to drop to target by the end of 2026.
-
-·  The "Holy Grail" Strategy: Investors must ignore the broader index and maintain high cash reserves (around 70%) to mechanically buy deep price deviations in AI stocks (like KLAC, AMAT, and LRCX) and crypto assets (like Bitcoin and Solana), and trimming on the pumps .
-
-·  Global Real Estate Fracture: Rising yields will impact global housing markets differently: causing price stagnation and low inventory in the US, forced-selling and cyclical declines in the UK, bubble-popping corrections in Canada and Australia, and a continuous structural crash in China .
-
-·  Geopolitical Undercurrents: The current economic deterioration, masked by manipulated employment and inflation statistics, mirrors the historical decay of the Roman Empire, signaling a long-term decline of US imperial and financial dominance .
-
-El Presidente Trump threatens to stop the US from trading with EU and China if the Fed does not cut rates. If Trump actually did this then it would be probably one of the most catastrophic things that Trump could do to kill the US Economy, bond prices would spike far higher than folk can imagine, yes we would get our stock market CRASH buying opportunity but unless President TACO backtracked quickly then this trigger a financial crisis along the lines of 2008 that we got a taste of during the Tariffs tantrum, where the bounce back from could take a decade!
-
-So despite noise from the White House demanding rate cuts, instead rate hikes are incoming as has been my base case all year, folk forget that the consensus up until quite recently was that Trumps inside man Warsh would obey his master and cut rates, nope, not going to happen, be prepared for a bond market panic event with the expected rate hikes to deliver further deep deviations in target stocks which looks set to soon manifest as we go into the October crash window all courtesy of the clown in the white house and his Iran War sending inflation expectations soaring across the world, which were already riding high courtesy of tariffs.
-
-The Trump regimes luck has run out and we will see the S&P nothing burger succumb to gravity and meander its way towards my year end target of 6350 as we are now into a global bond market panic, so even if the Fed wanted to keep rates on hold it can't not if everyone else is hiking to attract buyers for their bonds who demand higher yields in face of higher inflation expectations and debt deluge by all. The only reason the Fed has been dithering and not already raised rates is because of the mid-terms so as not to upset the cry baby in the white house, however as my analysis in this article will show a September rate hike has been probable for some time, to get the long end yields down the Fed needs to increase short end yields hence rate hikes.
-
-"Donald Trump has called for interest rates to be cut later this month, claiming higher rates put the US at a "very unfair disadvantage".
-
-The chickens are coming home to roost, all of the damage done by Trump faces a day of reckoning, $40 trillion in debt with a $2 trillion deficit and the clown wants to CUT RATES as if that will encourage investors to BUY the US debt deluge. So whilst we are all eager to buy the dips and have been doing so in target stocks, know this that we will all buy too high!
-
-It's not going to be long before there will be comments asking why x,y,z stock is dropping, what else do folk expect to happen during a BEAR MARKET? Even with the S&P burger riding high at 7700 folk can see the extent of the BEAR MARKET in the spreadsheet column Q, where most stocks are down more than 20% from their highs and many such as Qualcom, LRCX, IBM, KLAC, Intel, and TSLA are down over 30% and there's some down over 40% i.e. AMAT, stock prices drop during a BEAR MARKET! I imagine most target stocks by 6350 will bet at least a further 25% lower which will nudge most down over 50%, definitely most of the secondaries will be 50% off their highs, the likes of TESLA eyeing sub $200 vs it's near $500 high.
-
-This article is a continuation of my last posted a couple of weeks ago, this covers secondary stocks as well as the unfolding bond market crisis as debt bombs are primed to explode not just because of AI out competing corporate and sovereign debt but also not forgetting the fool in the White House who continues to do everything to make America Poor Again with a fresh round of disruptive tariffs, and then we have the War on Iran that has cut off 20% of the worlds oil life blood triggering waves of inflation as fuel prices surge. In fact America got lucky in that the Trump Derangement Presidency hit at the same time as AI capex boom that has acted to mask the damage done to the US economy, it is sheer luck that the US is not already in recession thanks to the AI Mania.
-
-https://www.patreon.com/Nadeem_Walayat/posts/nvidia-earnings-167757592
-
-CONTENTS
-
-Stock Market Index Chaos
-
-·  US FAKE Unemployment Statistics
-
-·  US Bond Market Series of Panic Events in 2026 and 2027
-
-·  US CPI LIE Panic Event
-
-·  Money Printer Goes Brrrr
-
-·  US Rate Hike Incoming
-
-·  Bond Yields Spiking so Why No QE to Lower Yields?
-
-·  UK and Japanese Bond Yields
-
-·  Japanese Yen Crisis illustrated!
-
-·  Yen Dollar Pressure Cooker
-
-·  STOCK MARKET ARMAGEDDON SCENERIO
-
-·  2026 Smells like 1987
-
-·  Stock Market Mid-term Years Seasonal Dumps
-
-·  S&P Sept to December 2026 Trend Forecast
-
-·  State of the BEAR MARKET
-
-·  Rising Bond Yield Impact on Housing Markets
-
-·  US House Prices 12 Month Forecast
-
-·  UK House Prices Forecast
-
-·  China House Prices CRASH
-
-·  Canada Housing Bear Market
-
-·  Australia House Prices Mania Bubble Top
-
-·  The Holy Grail of Investing
-
-·  AI Secondary Stocks
-
-·  1. Micron $1016 - EGFS 150%, 157%, Dir 0%, 0%, PE Ranges 63%, 10%
-
-·  2. LRCX $307 - EGFS 36%, 77%, Dir 18%, 29%, PE Ranges 251%, 118%
-
-·  3. AMAT $455 - EGFS 38%, 42%, Dir 12%, 5%, PE Ranges 185%, 115%
-
-·  4. KLAC $185 - EGFS 18%, 59%, Dir 11%, 16%, PE Ranges 254%, 129%
-
-·  5. AMZN $259 - EGFS 7%, 61%, Dir 12%, 5%, PE Ranges 94%, -7%
-
-·  6. Qualcom $169 - EGFS -23%, -9%, Dir -5%, -23%, PE Ranges 39%, 49%
-
-·  7. TSLA $354 - EGFS -8%, 20%, Dir -4%, -11%, PE Ranges 421%, 338%
-
-·  8. IBM $235 - EGFS -3%, 6%, Dir 14%, -13%, PE Ranges 69%, 59%
-
-·  LULU $103 - We Will All Buy Too High
-
-·  Bitcoin's Most Profitable Bear Market
-
-·  The SOLANA Accumulation and Distribution Game.
-
-·  THE OPERATING SYSTEM
-
-·  The Fall of the Roman US Empire
-
-Stock Market Index Chaos
-
-The stock market indices are chaos personified, appear to be defying the reality of soaring bond yields manifesting in the nothing burgers trading along their highs, basically going nowhere whilst under the hood many target stocks are in severe bear markets or experiencing huge price pumps where one can capitalise on both, which is why I and many patrons are beating the S&P despite being 70% in cash without the risk of drawdown through the mechanisms of buying the deep deviations from the highs when stocks become cheap and then trimming the rips as evidenced by the 10x brigade, up 33% since Mid July after have collapsed earlier in the year on the narrative that AI had killed software stocks, as I often say at the lows all of the news is BAD, whilst at the highs all of the news is euphoric which is why I pay NO attention to that which most focus upon, instead what I look at are the macros, metrics, stock charts and narratives, I pay virtually no attention to the NEWS MEDIA. I don't even watch the news! I can't tell you when I last watched a news channel such as the BBC.
-
-The S&P this year more than most years truly has been a complete nothing burger in terms of reflecting individual stock trends, folk who take their cue from the S&P have missed the 50% dumps and 2x to 3x pumps.
-
-The S&P defies the macros of a destructive Presidency where so far the damage done has been masked by the Hyperscalers capex boom that totals $1 trillion to date, with another $1 trillion expected to be spent over the next 12 months, that's why the S&P has defied the Trump tariffs catastrophe, subversion of democracy, crony capitalism, corruption, disruption of economic alliances, debt deluge, topped off with an unwinnable war on the commands of the parasite that controls America to an extent, a war that was supposed to last 5 days is into it's 7 month that has brought fuel reserves to critical levels and will result in demand destruction. So under the hood the macros are screaming RECESSION INCOMING, but we have the hyperscalers capex boom vaporising cash flows, taking on debt in a mad rush to hoard compute just as they did with software engineers not so many years ago, excess capacity compute power that only has a shelf life of 3 to 4 years! There is a lot of creative accounting going on under the hood which is why the hyper scalier stock prices are subdued with most trading well off their highs, its why Nvidia's excellent earnings report FAILED to ignite much of a rally because of Financialization of the chips sector is inflating a house of cards revenue and earnings bubble.
-
-On paper Nvidia looks dirt cheap, but the stock price is failing to break higher leaving many investors confused, they don't understand that the reason why the Nvidia earnings pump fizzled out is because the smart money SOLD INTO IT! The smart money is distributing whilst the noob money is buying. I expect Nvidia to drop because real earnings are not as good as the numbers being reported, hence we are primed for buying opps as I covered in my last article.
-
-The data centre build out reminds me of post pandemic hiring surge when they took on too many workers, it's lemming-esque behaviour if others are hiring then we got to hire even more, hoarding of workers, and similar is happening with AI compute power, if others are buying Nvidia GPU's then we also have to got buy them, we'll think about how to make use of them later, that's what's happening with the data-centre build out, hoarding of compute power at inflated prices, it's a BUBBLE that will POP because there isn't the demand for all this compute, and the more that gets built and hoarded the lower will be the actual use and thus the bigger the bubble gets vs reality of demand for towards which there is financialisation going on so as to allow customers to expand buying capabilities far beyond which they can make use of. It is an AI MANIA!
-
-So the hyperscalers continue to vaporise their free cash flows transforming cash rich mega-corps into debt addicts, inflating the corporate debt bubbles sending yields soaring as hyperscalers out compete sovereign debt markets, putting long yields under pressure and risk sparking a bond market panic event that I have written to expect many times over the past year, we are well into a slow motion bond market panic event.
-
-And if all of that was not bad enough we have the three horsemen of the IPO Apocalypse where SPAC-X set the ball rolling and following in mid October will be Anthropic's $1 trillion IPO that will add to the SPAC-X liquidity drain, with the OpenAI IPO pushed into Mid 2027, all 3 act to suck money out of the markets as the insiders cash out in waves of unlocks. It does not take rocket science to work out that these IPO's are total poop, alls one needs to do is look at the PE ratios, a peak to trough 90% drop is in store for all three.
-
-SPAC-X pumped, then halved, and now is in a counter trend rally suckering in noobs who think it's now a good buy before it next slumps to well below $100.
-
-It's only a matter of time before the indices play catch up to what's taking place under the hood, in the meantime one cycles between buying and selling opportunities as they come along.
-
-US FAKE Unemployment Statistics
-
-The books are cooked! Latest jobs report, US unemployment rate goes DOWN WHILST 80% of jobs are LOST!
-
-US official BLS unemployment rate of 4.1% is based on -
-
-The participation rate in July 2008 going into the financial crisis was 66%
-
-At 66% participation rate US unemployment rate would be 10.75%
-
-Actual US unemployment rate is near TRIPLE the official fake statistics because folk have been systematically excluded from the stats which makes them worthless to compare the present unemployment rate against the past i.e. at the height of the financial crisis the US unemployment rate was 10%! Today's rate on the same basis is HIGHER than at the peak of the financial crisis!
-
-The Non farm jobs report has become worthless!
-
-The empire is dying whilst the books are being cooked to give the impression of Imperial Might, this is what it was like as the Roman Empire died, in total denial, diluting the gold in the coins, news of fake imperial conquests when in reality the Empire was in retreat. How many times has the Trump regime claimed victory in it's war against Iran?
-
-The US Empire peaked with the dot com bubble, since whence has been in decline, in denial, ever more eager to use that one advantage it has left, the US military. Americans point to the peak of China without realising that they too have peaked and are now an empire in decline lashing out at friend and foe in desperate attempts to halt decline, doing exactly the same as China, cooking the books and publishing fake statistics.
-
-US Bond Market Series of Panic Events in 2026 and 2027
-
-Eight trillion of US government debt needs refinancing during 2026, let that sink in, $8 trillion! This means that rolling over US debt is hoovering up market liquidity at a rate of $800 billion per month hence sending yields across the curve higher sending the Treasury panicking by announcing a pittance of $4 billion of bond buy backs, a literal drop in the ocean aimed towards lowering long rates that is not going to work because of the war inflation fundamentals in force, alls they are doing is printing dollars means higher inflation pushing rates HIGHER not lower, to lower long yields the Fed needs to increase short end rates to encourage short end buying to take pressure off the long end and so a rate hike is incoming.
-
-Trump responded to the bond market crisis in the only way he knows how which was to threaten military action against the bond market! If the bond market took him seriously then you would see yields spike higher.
-
-And there's still folk who think that this clown is a genius playing 4d chess. A hollow Presidency that perpetuates chaos and confusion, all that garbage about replacing Powell with Warsh so rates would be cut.
-
-The problem is the refinancing cliff does not stop with $8 trillion in 2026 because a lot of the refinancing is short-term debt which means everything refinanced for less than 1 year duration gets refinanced during 2027, guess what the refinancing tally will be next year? About $11 trillion! The US has run out of the refinancing runway and thus yields will be higher in 2027! Not forgetting the $2 trillion budget deficit which will add $2 trillion of NEW debt to this year and likely more to next year. Refinancing means there needs to be someone willing to buy all this debt, there isn't as the Norwegian Sovereign wealth fund illustrates that announced a $80 billion drop in their exposure to US debt, similar with the wrecked Gulf states, same with the BoJ dumping treasuries to cap dollar strength.
-
-Rising yields benefit financials and insurance companies, whilst rising inflation commodity and energy stocks, and cash rich stocks with large balances to earn interest on such as Apple. Whilst those with a lot of debt obviously pay the price and thus will have lower future earnings. Cash is King!
-
-US CPI LIE Panic Event
-
-This is why CPI is a LIE - a real inflation spike is underway that the fake stats are not reporting on due to manipulating the date, but is being experienced in the economy as we are seeing it's impact in the bond markets as market rates rise increasing the cost of borrowing all whilst most focus on the Fed funds rate.
-
-The next inflation report is on Friday 11th September, the market expects 3.4% vs 3.4% previous, given what's going on under the hood i.e. the spike in fuel prices then I suspect we will see inflation higher than expected. which will set the scene for apocalypse Wednesday as we have the oil price trending higher that looks set to spike above $100 once more towards $120, then what for inflation expectations? Yields will spike even higher creating snowball run on sovereign debt as bond investors panic sell for the safe haven if cash US Dollars, in fact they don't need to sell, alls they need to do is NOT refinance maturing US debt because in this climate cash is KING!
-
-Money Printer Goes Brrrr
-
-The money printer usually goes brrr because the governments are addicted to spending money they don't have...
-
-US M2 money supply
-
-·  2016 +6.5%
-
-·  2017 +5.3%
-
-·  2018 +3.6% Rate hike tightening
-
-·  2019 +6.6%
-
-·  2020 +24.9%
-
-·  2021 +12.4% Transitory inflation BS
-
-·  2022 -.01% Recession / Bear market
-
-·  2023 -2.3% Recession / Birth of the Bull
-
-·  2024 +3.8% baseline
-
-·  2025 +4% baseline
-
-·  2026 +5.6% accelerating.
-
-However there is a 1 to 2 year lag between M2 and inflation
-
-There is NO tightening, money supply is accelerating which means inflation is not going to come down any time soon, it's going to remain stubbornly high, made worse by the war in inflation fuel price spike, 2022 was this decades first inflation wave which I had been warning to expect in a decade of inflation waves since 2020. We are in the early stages of the next inflation wave hence why the markets have been delusional all year to expect rate cuts when the opposite has always been most probable as I have been iterating since the start of the year.
-
-US Rate Hike Incoming
-
-The consensus has been that the Fed won't hike before the mid-terms elections instead choose to delay, kick the can down the road until after the elections, however in both previous mid-term years the Fed DID hike rates, Sept 2022 by 0.75%, and in the Sept 2018 mid-terms 2018 by 0.25%.
-
-The next rate decision is on 16th September at 7pm UK time, the CME tool has jumped from 33% rate hike probability a week ago to a 64% chance in the wake of 'inflationary' signals.
-
-Though the reality is that the fed funds rate FOLLOWS the market rate as the 2 year bond yield illustrates with current pressure building for an imminent Fed rate hike, the yield is 4.36% vs Fed 3.63%, the 2 year is trending higher which means there will need to be a series of rate hikes.
-
-As above we have a probably higher CPLIE on Friday 11th Sept that would set the stage for the Fed hike rates starting on the following Wednesday which has been my base case all year, many will soon say a rate hike was obvious, usually the same who were saying not so long ago that rate cuts were certain given that Warsh was Trumps puppet at the Fed.
-
-The bottom line is that for the anticipated crash / bear dump to manifest itself then we need the likes of what was largely an unexpected Fed rate hike until very recently, I say largely because whilst it will be a shock to MSM talking heads, the CME tool and the bond yields have been pointing to rate hikes for some time, hence the Fed should raise rates this month.
-
-The fool in the white house calling for rate cuts does not appear to understand that the US can not cut rates if everyone else is RAISING rates, as we will see next week when the Bank of England raises rates on Thursday followed by Japan on Friday and thus throwing the rate hike ball back at the Fed.
-
-The extent of market reaction depends on the statements that accompany the rate hike, i.e. how hawkish is the Fed, are they implying that they are going to pause for a while after the hike or is this one of a series of hikes, anyway regardless it will at least deliver technical sell signals in the indices so as to set the ball rolling, and we will just have to see the degree to which price declines cascade as fomo turns to fear as investors focus on the impact of higher rates on future corporate earnings.
-
-I will just continue doing what I have been doing all year, buying the deep dips as per the buying ranges and selling what pumps such as recent trims of Microsoft, folk can see what I am doing in the Trade Winds article where I update each days buys and sells, so folk should bookmark this link - https://www.patreon.com/Nadeem_Walayat/posts/trade-wind-166506707
-
-Bond Yields Spiking so Why No QE to Lower Yields?
-
-The question that the mainstream media fails to ask: If bond yields are spiraling out of control, why don't the central banks just flip the switch back on the printing press? Why aren't they rushing to "rescue" the market with more Quantitative Easing?
-
-The answer, if you peel back the curtain is that the central bank clowns have painted themselves into a corner.
-
-They want you to believe this is about a "mandate" for price stability. That’s just the cover story. The reality is that we are witnessing the inevitable endgame of a decade of the Great Monetary Ponzi. Here is why the "QE magic" has run out of road:
-
-1. The Printing Press Trap (The Inflation Feedback Loop)
-
-They spent years pumping trillions into the system, flooding the economy with cheap, printed money. That was the easy part. Now, the bill has come due in the form of persistent inflation. If they were to restart QE now to suppress bond yields they would be admitting that the currency itself is being sacrificed.
-
-You cannot print your way out of a debt crisis when the very act of printing destroys the value of the money you are printing. If the CBs restart QE the market will instantly see it for what it is: monetization of the debt. Fiat would crater, inflation expectations would skyrocket, and the bond market would likely crash harder because investors would demand a massive "inflation premium" just to hold onto the debased paper. They are terrified that if they blink they lose control of the narrative completely.
-
-2. The Quantitative Tightening (QT) Charade
-
-Right now, they are trying to play the "responsible adult" with Quantitative Tightening. They are selling bonds trying to prove they aren't just printing money for the Treasury. But the math says its a desperate attempt to normalize a balance sheet that is fundamentally broken. They are withdrawing liquidity, which is precisely why bond yields are soaring. They are stuck in a catch-22:
-
-Stop QT/Restart QE: You save the bond market but kill the currency and hyper-inflate the economy.
-
-Continue QT: You kill the bond market (and mortgage holders) but try to maintain the illusion of being "in control."
-
-3. Fiscal Dominance: The Real Truth
-
-The market knows the truth, even if the Fed won't say it: Fiscal Dominance. The governments are addicted to borrowing, the CBs are effectively trapped as the lenders of last resort. The only reason they aren't doing QE today is because they are praying that something else breaks first, or that inflation magically retreats, giving them an excuse to pivot.
-
-But make no mistake the "system" is failing. We are past the point of subtle policy tweaks. They are hoping to keep the plates spinning long enough to avoid an outright collapse but every move they make is just a different flavour of delay.
-
-The Bottom Line
-
-They aren't doing QE because they know it’s the "nuclear option." If they press that button now they confirm to the entire world that the economy can no longer function without perpetual money printing. They are holding out, hoping the market doesn't realize the emperor has no clothes.
-
-But as observers of these cycles you have to ask yourself: how long can they pretend that the debt is sustainable before the market decides that 5% or 6% yields aren't high enough to compensate for the risk of collapsing fiat?
-
-As you look at these markets you should be asking yourselves: if they are forced to pivot back to QE when the next crisis hits what does that do to the valuation of your holdings? Because when the printing press starts again it won't be to "save the economy, it will be to save the system from itself.
-
-UK and Japanese Bond Yields
-
-It's not just US yields spiking, the white house buffoon has sparked a global inflation panic sending yields soaring across the world, in this war there are not innocent bystanders, we all pay the price!
-
-UK 10 year has nudged over 5%.
-
-What am I doing? Accumulating 3GIL. It's proved a profitable trade before.
-
-Japanese bond yields are also spiking near doubled vs a year ago and doing diddly squat to halt the Yen blood bath which ensures Japanese rate hikes are incoming.
-
-Japanese Yen Crisis illustrated!
-
-UK and Japan have near the same GDP! Near twice the GDP per capita.
-
-This should NOT be possible because Japan has twice the population! And well Japan is technologically well beyond the UK in virtually every metric!
-
-The crisis is that Japan is DIRT CHEAP! The YEN IS DIRT CHEAP! Whilst the British Pound is Expensive! Up near 80% in 6 year.
-
-There is a hard reset coming, it has to happen because The UK and Japan are NOT COMPARABLE in terms of GDP. The pendulum has swing to an EXTREME as a function of Japanese investments abroad, selling yen to buy assets such as tech stocks and properties in London. Which means the GBP is primed for a significant bear market. In terms of immediate direction of travel, GBP should see a downswing into late October the depth of which depends on whether first GBP 1.32 and then 1.30 breaks to target sub 1.25 which will be followed by an upswing into the new year.
-
-Yen Dollar Pressure Cooker
-
-The dollar yen rate determines risk on vs risk off... the higher the dollar goes the better for risk on assets as it feeds the carry trade, however it acts like a pressure cooker which eventually vents stream that we see as risk off events, sending risk on assets sharply lower.
-
-Right now we are coming off an extreme with the pressure cooker primed to pop it's lid as both US and Japanese central banks are attempting to prevent the the dollar from going higher that is contributing to the Japanese bond market crisis that should see the dollar between 14% to 22% lower against the Yen, that delivers the carry trade unwind.
-
-STOCK MARKET ARMAGEDDON SCENERIO
-
-When Japanese Yields EXCEED US Yields. Ahead of which there will be a wake up moment for markets of what's in the pipeline, everyone will rush for the exit at the same time!
-
-The carry trade won't just unwind, it will COLLAPSE, as would the dollar.
-
-The trends are there.... Japanese yields are rising faster then US yields.
-
-The Yen is EXTREMELY WEAK.
-
-You ve got two mechanisms for an EPIC VIOLENT Capital flows back into Japan after decades of investing abroad.
-
-On the brightside it gives one an opp to capitalise on the weak yen with another holiday! Accumulating Yen via the likes of GBJP.
-
-2026 Smells like 1987
-
-Everyone cheering to bring on the CRASH will be puking their guts out when it happens as their YTD gains evaporate, 2026 was never meant to be an UP YEAR!
-
-So folk need to prepare themselves mentally to see ALL of their gains for 2026 VANISH else they will be crying into their pillows at night, wishing they had never looked at a stock ticker.
-
-On the plus side as prices drop your percent cash will naturally go up 😃
-
-Stock Market Mid-term Years Seasonal Dumps
-
-September is the weakest month of the year, with the 2nd half of the month where most of the action is, fits with the fed rate hike on 16th Sept! Mid-terms ADD to weakness due to greater political uncertainty, S&P in September is down - 1.4% all years, and -2% mid-terms. October early trend tends to be volatile but tends to end strong, +1.1% all years, +3% mid-terms.
-
-2026 Trend to date.
-
-Up into end Jan, 10% correction into end March, 20% rally into end of May, stagnating along the highs since which implies distribution / rotation under way, smart money selling.
-
-2025 Trend
-
-Mid Feb top, 20% drop into early April followed by a relentless rally all the way into the end of the year for a gain of +16.4%.
-
-Both of the last 2 mid-term years 2022 and 2018 had rate hikes in September!
-
-2022 Trend
-
-Volatile 9 month bear market, -27% to the low. From Mid August to Mid October S&P fell by 20%.
-
-2018 Trend
-
-Late Jan top, 11% correction into Mid Feb, +15% rally trend into early October, up about 9% on the year, with the third Fed rate hike on 26th Sept. S&P fell 20% from early October into the end of the year.
-
-So both mid-term years saw a 20% drop where the 2018 drop in particular caught most by surprise.
-
-S&P Sept to October 2026 Trend Forecast
-
-The seasonal pattern suggests September be a strong down month that continues into October where the market tends to make a bottom. The S&P peaked on 17th August at 7830, so a 2 month dump could see the S&P lower into Mid October by 10% down to 7000, put in a bottom before rallying into late November and then comes the big surprise which takes the S&P down to my target of 6350 by the end of 2026.
-
-So we could see an initial 2 month correction morph into a 4 month bear market going into January 2027 delivering a 20% drop which would be like 2018 that would catch virtually everyone by surprise achieving my year end forecast of 6350 which I first mentioned as a possibility several months ago.
-
-Which implies that August should have been THE TOP, hence my statements that 2026 rhymes like 1987.
-
-State of the BEAR MARKET
-
-Spreadsheet - Column Q - Stocks over 20% off their highs.
-
-Link - https://docs.google.com/spreadsheets/d/1PuPxdy4sGJwC1AHfbSfHdPRSaQ43OeqEIO8L4I7-JAU/edit?usp=sharing
-
-Primaries - META leads the way -27%, AVGO -25%, AMD -20%
-
-Secondaries - KLAC -43%, AMAT -38%, Qualcom -37%, Intel -37%, LRCX -31%, TS:LA -30%, folk will find reasons NOT to accumulate even KLAC! I added some Friday. IBM -29%, Micron -26%
-
-Medium Risk - FSLR -36%, WDC -43%, ON -46%, CRUS -40%, GFS -52%, LOG -30%.
-
-High Risk - Most stocks as per spreadsheet.
-
-This is why most days I am buying something, regardless of how high the S&P trades.
-
-Rising Bond Yield Impact on Housing Markets
-
-Cash is King especially when rates are rising. Folk can appear rich on paper, own lots of properties but properties are illiquid, if you can't earn or borrow to service ones debts and costs then what you have is a House of Cards that could collapse when faced with liquidity issues, this is how home builders tend to go bust, have lots of properties under development but unable to finance completion, it's how China's Evergrande went bust! So when rates are rising and credit is tightening that's when folk are at the risk of losing it all. Cash is King!
-
-Folk during the mania are eager to put deposits down on properties only to find out that the developer has gone bust and their deposits are gone!
-
-The US housing market is most impacted by the 10 year yield whilst the UK is impacted by the 2 to 5 year yield.
-
-Thus rising short end yields impact the UK harder then the US because the UK relies heavily on short-term 2 year and 5 year fixed-rate contracts (75% of mortgages). As existing terms expire millions of households face an immediate step-up in monthly repayments upon refinancing, directly curtailing disposable incomes. Highly leveraged private landlords experience severe margin compression. Stricter lender interest-coverage ratio (ICR) tests at higher yield levels force many landlords to sell properties, adding sell-side supply to the market while pushing displaced buyers into the rental sector .Because inventory is not locked into 30-year fixed rates, UK home prices adjust downward more rapidly than in the US, particularly in higher-valued regions like London and the South East.
-
-Whilst in the US most homeowners hold 30-year fixed mortgages (85%) many locked in below 4%, rising yields create a financial barrier to selling. Moving to a new home requires exchanging a low rate for a 6.5% to 7%+ rate causing sellers to hold onto existing properties. Buyer purchasing power drops significantly pulling transaction volumes down. However, because inventory remains severely constrained by the lock-in effect home prices remain sticky high despite weak affordability. Homebuilders capture a higher share of transactions by offering rate buy downs (paying up front to reduce the buyer's mortgage rate that individual sellers cannot match.
-
-So rising yields tend to freeze the US housing market as folk can bide their time for better rates whilst increases selling pressure in the UK due to structurally forced to remortgage which makes US house prices less volatile then then UK house prices given the higher forced frequency due to fixed rates expiring into high standard variable rates.
-
-UK mortgages are more sensitive to central bank interest rate changes then US mortgages due to the long lock up period which is largely down to Fannie Mae and Freddie Mac, whilst in the UK it's all down to private banks to absorb or hedge duration risk. So british home buyers are getting screwed by the system because their is no government sponsored backstop to guaranteed UK mortgage backed securities, instead cyclic refinancing that tends to include huge fees.
-
-US House Prices 12 Month Forecast
-
-Current State: Locked in a "rate lock-in" trap. Existing homeowners with sub 4% mortgages refuse to sell, keeping inventory historically low and preventing major price declines despite weak sales volume.
-
-Key Positive Drivers: Chronic structural deficit of single-family homes, massive demographic wave of Millennial first-time buyers, and anticipated Fed rate cuts despite yields suggesting otherwise.
-
-Key Negative Drivers: Severe affordability headwinds from 6.5% mortgage rates, historic high price-to-income ratios, and rapidly accelerating home insurance premiums.
-
-Prospects: House prices expected to stagnate, likely will be 2% higher in 12 months as the Fed and Government will do their utmost to prevent falling house prices which would ensure a recession however the feed back loop of a stagnating housing market will result in a stagnating economy.
-
-UK House Prices Forecast
-
-UK borrowers traditionally take on shorter-term fixes then US borrowers so the UK housing market is more rate sensitive then the US housing market
-
-Current State: Bouncing along a cyclical floor. Affordable northern regions (North West, Yorkshire) and Northern Ireland are outperforming, while London and the South East face price softness.
-
-Key Positive Drivers: Positive real wage expansion, and strong regional rental yields attracting buy-to-let investors.
-
-Key Negative Drivers: Buy-to-let landlords exiting the market due to regulatory/tax shifts (adding sell-side inventory in the South) and elevated fixed-rate mortgage renewal rates. Bank of England looks set to raise interest rates.
-
-Prospects: Stagnating UK house prices look set to fall over the next 12 months by about 5%.
-
-China House Prices CRASH
-
-Current State of the Market - Broad Secondary Market Slump: Resale home prices across major cities remain down between 5% and 8% year-over-year, as price discovery in the secondary market reflects actual market clearing faster than primary (new-build) prices.
-
-Key Positive Drivers (+)
-
-Substantial State Policy Support: Lower down payment requirements, record-low mortgage benchmark rates (~3.0%), and state-backed programs to purchase unsold developer inventory for conversion into affordable housing.
-
-Key Negative Drivers (-)
-
-Severe Inventory Overhang: Massive unsold housing stock in Tier-2 and Tier-3/4 cities requires several years of organic demand to fully absorb.
-
-12-Month Outlook & Price Forecast
-
-China housing market is a total disaster, in a downwards death spiral due to structural issues of speculative over building for which China does not have the population to support i.e. demographics of fast ageing are working against the Chinese housing market so there is no quick fix. The trend is for a 5% to 8% per annum drop which could persist for many more years to eventually see a 50% drop off the high, so we may only be at the half way mark though top-tier cities will stabilize well ahead of regional markets so the price falls won't be uniform.
-
-Bottom line China is the New Japan, and not in a good way, China went on a building boom just as their population was peaking, and since which the workforce has been in decline by some 20 million workers per year where the canary in the coal mine was the Evergrande failure in 2021 as I wrote in articles at the time if it being the nail in China's Housing bull market which has stood the test of time. The response was the Temu export economy that the US trade war is disrupting which puts further downwards pressure on the chinese economy and neither will increasing domestic consumption work as a fast ageing population is not going to go on a spending binge hence there is worse to come as China seeks scapegoats and distractions away from economic disaster, hence increases the probability for a War on Taiwan. If the US can do it with Iran then China can do it with Taiwan, a similar smoke and mirrors exercise, which will definitely deliver a deep discount buying opps in TSMC if when the dust settles the factories remain standing!
-
-Canada Housing Bear Market
-
-Canadian interest rates have been on pause since last cut in October 2025at 2.25%. Canada could be forced to follow a US rate hike else face further severe economic consequences as investors sell Canadian assets to buy US assets forcing Canadian yields higher. The Canadian economy is facing the full force of Trump the trade war weakening the Canadian economy/.
-
-Current State: Canadian house prices have been in a severe bear market after having topped in 2022, suggests structural weakness in the Canadian economy / housing market i.e. a glut of properties coming to the market that the trade war acts to worsen.
-
-Key Positive Drivers: High net immigration driving underlying housing demand, aggressive Bank of Canada rate cuts improving buyer qualification power, and pent-up demand.
-
-Key Negative Drivers: Ongoing "mortgage renewal cliff" forcing fixed-rate borrowers into significantly higher monthly payments, severe price-to-income detachment, and economic cooling.
-
-Prospects: Expect Canadian house prices to continue drifting lower as the worst of the bear market is in the rear view mirror, house prices could drop another 3% over the next 12 months.
-
-Australia House Prices Mania Bubble Top
-
-Current rate 4.35%, last rate hike was 0.25% in May, next could come as early as this month especially if the Fed raises rates.
-
-Current State: Broadly resilient near record highs, but starkly divided. Mid-sized markets (Perth, Brisbane, Adelaide) show double-digit structural momentum, whereas Sydney and Melbourne are leveling off due to hitting extreme price ceilings.
-
-Key Positive Drivers: Severe national undersupply of new home completions, high net overseas migration, and extremely tight rental vacancy rates pushing tenants into buying.
-
-Key Negative Drivers: Restrictive Reserve Bank of Australia cash rate, strict debt-to-income stress testing by lenders, and reduced household savings buffers as rates rise.
-
-Prospects: Australia is in a housing mania with prices up about 60% in 6 years, Canada shows what happens when the bubble pops, which is inevitable, where the next rate hike as early as this month could be the pin that pops the Australian housing bubble, sending prices lower, triggering a flood of properties coming to the market both in attempts to capitalise on the mania and as forced sellers unable to service increasing mortgage costs. As developers go bust then market confidence erodes, transactions tend to drop. Australian house prices could easily replicate Canada's 20% drop.
-
-That's five housing markets all with different house price trends! I would bet folk weren't expecting this.
-
-The Holy Grail of Investing
-
-My base case for 2026 was for a bear market to accumulate at deep deviations from the highs that have so far have only manifested to limited extent, i.e. the 10x brigade which is now up over 30% since Mid July, so there have been a number of opportunities to accumulate at deep deviations from the highs and distribute into new highs, usually repeating buying and selling in the same stock, the net effect of which for me and many patrons who followed is that despite being 70% in cash, we are beating the S&P without the risk of drawdown.
-
-Instead IF the S&P had fallen to stand 20% down on the year AND dragged many target stocks lower with it then instead of being up 15% on the year, then buying the falling knives would place ones portfolio somewhere around 5% to 10% down on the year depending on how much cash one deployed into the falling knives and how well one managed fx positions as a 20% drop in the S&P would likely be accompanied with a dollar pumping by maybe 10%.
-
-So the net position right now is for both the portfolio and S&P up about 15%, whilst at 70% cash.
-
-So what if we get the 20% drop in the S&P what would that mean for ones portfolio?
-
-The S&P dropping by 20% from here would put it down about 5% on the year, buying the falling knives would once again target a drop of between 5% and 10% off the portfolios peak value, so by the time the S&P has fallen 20% i.e. down 5% on the year, the portfolio would still be up about 5% to 10% DURING a BEAR MARKET, as say 30% of that 70% cash mountain is deployed into buying the falling knives.
-
-This outcome would be unprecedented and unplanned for a purely a function of a few simple mechanisms that I iterate from time to time.
-
-1. The S&P is a NOTHING BURGER to be IGNORED when it comes to what one does with individual stocks. Despite continuously iterating this for years folk still ask if I expect the S&P to fall then should one sell x,y,z stock to buy it back cheaper, my response tends to be see each stock on it's own. Some stocks crash by 50% whilst others 2x or even 3x all whilst the S&P does it's own thing.
-
-2. Viewing each stock on it's own means one ACCUMULATES the deep deviations from the highs AS PRICES DROP as STOCKS BECOME CHEAP, the classic example of this during 2026 was Microsoft! Where during the year I 4xd my position, which I have been trimming as it continues to break higher and become expensive. And the same holds true with EVERY STOCK! EACH STOCK ON IT'S OWN IN ISTOLATION WIHOUT REFERANCE TO OTHERS AND DEFINETLY WITHOUT REFERANCE TO THE INDICES. Folk can see this in action in the Trade Winds article where you can see that I BUY and SELL EVERY DAY. I don't even look a the S&P, it is that irrelevant.
-
-3. High Percent Cash allowed one to BUY the dumps BIG as they came along because one is primed to capitalise upon such opportunities in a mechanistic manner. whereas too little cash and one misses most of the opps as one THINKS too much about exposure and risk i.e. I plowed about 5% into the software sector, and 4% into crypto's, I doubt I would have done that had I been say 20% in cash, instead likely seek to keep my powder dry for the AI stock opportunities. Having higher percent cash means one can beat the S&P without little if any portfolio drawdown.
-
-These three mechanisms have got me to a position where IF the S&P drops by 20% going into year end then I will end the year UP during a BEAR MARKET! That IS INCREDBLE, which despite noise in the comments from time to time from those who have yet to comprehend what I am demonstrating in real time, this is TELLING ME that what I am doing IS THE RIGHT WAY TO INVEST! Investing like a machine that apparently cannot lose no matter what the stock market does! The Holy Grail of Investing.
-
-It really does not matter what the S&P does, not to my portfolio or to those who follow, only those who remain hitched to the S&P fail to grasp what I am saying which is that I CANNOT see how I can lose in the stock market because there are always stocks that are pumping, becoming expensive to SELL and there are always stocks dumping becoming cheap to BUY.
-
-One needs mechanism so that one buys when cheap and then sells when expensive REGARDLESS OF EVERTHING ELSE! Primary is reacting to price movements in real time, i.e. today Circle pumped to over $100 and a sell limit order got triggered so I took a look and added more sell limits and added a higher buy to rebuy when it next drops should it do so, that's it, that's all I DO each day. it's all there in the comments and the in the Trade Winds.
-
-Friday 4th Sept 2026Big Buys - FICO 10% dump buying at $910Big Sells - Small Buys - Small Sells SMCI, CRCL, NVDA
-
-As the buys and sells get triggered I go take a look at the charts and add / adjust / scrap limit orders, if a limit orders not triggered then I don't need to look at that stock.
-
-What could go wrong that makes me lose, where a loss would be if I am down MORE than the S&P during a year i.e. my expectations at the start of the year were that if the S&P drops 20% then I could be down upto 10%, depending on how well I managed fx as my 15% gain is in STERLING not USD which makes where the portfolio stands even better than it already looks.
-
-So when people say you got 2026 WRONG, yes I can see the S&P has not followed the trend forecast I posted last December, but I am not feeling it, this feels a lot better then if the market had done what I forecast it could do. Folk fixating on the S&P are completely missing the golden goose that keeps laying the golden eggs.
-
-AI Secondary Stocks
-
-The prospects vs risks boil down to which stocks benefit from capex spend double edged sword as when capex is cut so will their margins, it all depends on where we are in the capex cycle and for how long it extends i.e Micron at the same time has the highest prospects to be higher a year from now on the back of explosive earnings growth but also is the most vulnerable to a cyclical downturn which is hard to call, I mean back in 2023 the likes of Musk and Druckenmiller were expecting a recession in 2024, and well I think they've both give up trying to make such calls since, rather than an out right collapse in demand what we see is multiples compression that gives us the 50%+ drops in stock prices as we are witnessing with the likes of KLAC that has fallen from a peak of $310 to a recent low of $170 for a near 50% drop despite the metrics remaining firm. That coupled with signs of hyperscalers scaling back on capex spends delivers the likes of 60% to 70% drops for the likes of KLAC,so as is usually the case one needs to be prepared for the getting lucky events when the come along and not get sidetracked by MSM hysteria which tends to be euphoric going into the highs and End of the world pessimistic going into the lows, alls we can do is know when a stock is expensive and when it is cheap and thus accordingly accumulate the DEVIATIONs from the highs such as picking up some KLAC at $175 on Friday, not because its THE LOW because it's likely not, rather because it's 50% below the high.
-
-The signs for a slowdown in capex spends are there, we see it in rising yields, borrowing costs and credit default swaps that have spiked to financial crisis era levels for the likes of Oracle, and hence the Oracle stock price has been under pressure. Then we have infrastructure issues such as the power gird unable to meet demand for all of the under construction and planed data centres which means a scaling back in purchase of semi-conductors are in the pipeline when data centre builds start to become moth balled. There are many Achilles heels baked into the build out such as the useful life of assets such as GPU's which is a lot less than the fibre optic networks of the dot come era which will be one of the reasons MSM will report on to explain stock price drops AFTER the event.
-
-The bottom line is that assets such as GPU's have a short 3-4 year shelf life, which means deploying a large number of GPU's puts a permanent maintenance strain on free cash flow, so it's not a case of spend once and profit from for decades as was the case with fibre optics, instead it's a case of continuously keep spending or start mothballing data centres. On face value this implies demand for Nvidia, AMD, KLAC and so on but it also implies accelerating the switch to custom silicon and thus will hit general semiconductor demand whilst benefit the likes of Broadcom.
-
-And don't forget the stock prices move BEFORE the news hits the mainstream media which is why folk tend to experience the OPPOSITE price action to what the news suggests should happen hence why I don't bother looking at the news, instead focus on the metrics, stock charts, macros and mega-trends, the news is usually irrelevant.
-
-1. Micron $1016 - EGFS 150%, 157%, Dir 0%, 0%, PE Ranges 63%, 10%
-
-Drivers - Micron the runaway freight train, Structural HBM4/HBM3e supply lock-in, DRAM multi-year LTAs, AI server demand. Key risk Cyclical memory spot price collapses during oversupply hitting margins.
-
-I hold none, why? Eyeball time! What occupies most eyeball time is that which I am most exposed to and that which I most seek to accumulate, micron was always a periphery stock, not primary or core secondary i.e. a gamble secondary unlike for instance ASML and AVGO, Micron was more like a TSLA, just not as bad! But you get the picture Micron was always a side salad, still I did at one point have heavy exposure to which it rewarded me with an overall 3x profit, so as far as I am concerned it did it's job. Could have been a lot worse, could have done an Intel and trade 50% lower for years, though even Intel eventually came good, delivering a 3x on my peak exposure average buy, so things have gone great even if I did not ride Micron into SPACE!
-
-Metrics - Remain Epic on a whole different level of Epic, hard to believe what they imply for the stock price and hence I didn't believe them, saw them as too good to be true. Alls one can do is LEARN for next time, the key lesson is PAY ATTENTION TO THE EGFS they told me at $80 Micron was epic! Go read the articles and comments, the EGFS were hard to believe, nothing is 100% so there is the chance that Micron had broken the formulae and was spitting out gobbledygook, if the EGF's work for 90% of stocks then that's good enough for me, so I could not quite believe what the EGF's were suggesting, incredible, unprecedented, and as I often commented and wrote EPIC which is how things turned out since, the lesson learned when an EGF is EPIC is to go with the flow!
-
-Stock chart - When to buy? At $625, why $625? Because it's a 50% drop off it's high, from where the upside potential would first be a 2x to $1250 and then 3x, 4x, 5x..... I'll probably start lightly accumulating at around $800, there's support at the previous low of $740, increasingly size of buys down to target of $625. When / IF We get to $625 then one can ponder lower buy limits down to $450. That's how I'll reaccumulate a position in Micron.
-
-Stock price potential - Epic earnings growth IF sustained could see Micron 2x again! $1250 converts into $2500! It's beyond comprehension! I remember folk used to argue with me about buying too high at $60 when they could have waited and bought the LOW at $48! Now it's trading at $1000 coming off a high of $1250 and the way it's going it could 100x i.e. from $50 to $5000! Micron is in a class of it's own and the EGF's flagged this all the way from $80!
-
-2. LRCX $307 - EGFS 36%, 77%, Dir 18%, 29%, PE Ranges 251%, 118%
-
-Drivers 3D NAND layer expansion & Gate-All-Around (GAA) etch intensity. Key risk Volatility in memory CAPEX spend as Chip makers rapidly freeze new tool purchases when end-market demand softens or capacity exceeds demand.
-
-Metrics - Epic but expensive, a lot of growth is baked into the price i.e. even a year from now LRCX will be expensive at 118% unlike Micron which will be dirt cheap at just 10%
-
-Stock Chart - Where's the bear market folk ask, LRCX dropped 43% down to $240 that's your bear market! Though still just outside my buying range of $202 to $150 so I am raising the buy range to $226 to $156 and I'll start adding lightly at $250 having made some on a small short down to $240.
-
-Stock price potential - A year from now LRCX could be 30% to 40% higher so targets $406 to $450.
-
-3. AMAT $455 - EGFS 38%, 42%, Dir 12%, 5%, PE Ranges 185%, 115%
-
-Drivers - Broad WFE leadership, materials engineering, advanced packaging, Key risk China export restriction shifts and capacity demand issues.
-
-Metrics - Again just like LRCX Epic, and similarly over priced.
-
-Stock Chart - AMAT is like a carbon copy of LRCX,. also traded 42% lower to its recent low of $430. There's support at $380 so I'll pick up a small amount there. Buying range nudged higher to $324 to $220, increasing size of buys as it drops and similar to Micron and LRCX I currently hold none. Though did make a small amount on a short. So I am seeking $380 to start adding at about 50% off it's $740 high.
-
-Stock price potential - A year from now targets a similar gain to LRCX of 30% to 40% to about $600 to $650 off of current $455.
-
-4. KLAC $185 - EGFS 18%, 59%, Dir 11%, 16%, PE Ranges 254%, 129%
-
-Drivers Yield inspection monopoly on 2nm, High-NA EUV, and HBM packaging. Key risk Fab construction delays.
-
-Metrics - Epic but very over valued. Even though its dropped by near 50% it's still very expensive.
-
-Stock Chart - KLAC has dropped 45% from peak to trough down to $168, which is still someway above the top of it's buying range of $132. Think about that! The buying range has done it's job of PREVENTING FOLK from FOMO-ing into its $307 top, so many times folk have asked if I am going to raise my buying rage. I remain reluctant to raise KLAC's range because it will STILL be expensive at $132. Anyway I have been lightly accumulating as it drops as I take profits on my shorts which has nudged my position to 0.10% of portfolio, a tiny position. I seek sub $140 for bigger buys, all the way down to $90 which would be a 70% drop off it's high.
-
-Stock price potential - From current $185 I can see KLAC 25% to 30% higher a year from now, to about $235 to $245, so I don't see a return to a new all time high any time soon, the pump to $307 was pure FOMO mania, which yes it could happen again, which is why I did add some on the dip to $168, so that I at least have something to trim should it pump.
-
-5. AMZN $259 - EGFS 7%, 61%, Dir 12%, 5%, PE Ranges 94%, -7%
-
-Drivers - AWS AI workload acceleration, Trainium adoption, high-margin ads. Key risk Massive $220B+ CAPEX drag on FCF
-
-Metrics - EGFS and direction of travel are positive and not too expensive but Amazon does not have the growth of the above 4 Secondaries so one needs to wait for an opportunity to accumulate when cheap else risk over paying though time does work in Amazon's favour i.e. the stock will get cheaper over time.
-
-Stock Chart - Amazon stock price is low volatility, i.e .unlike the others so far the stock price does not tend to move too much, which means when it does move take the opps to accumulate and distribute, i.e. on the recent pump to $290 and before that dump to $225. The buying range is $201 to $152 which it did briefly trade into earlier in the year and which is where the bulk of my Amazon buy orders are. It's a steady eddy stock, accumulate in the ranges and trim some into new highs whilst one builds and maintains a position. I don't expect Amazon to experience a severe bear market i.e. it's going to be a case of getting lucky to see Amazon fall below $175.
-
-Stock price potential - From $258 Amazon could trade about 20% higher a year from now so I do expect Amazon to target a new all time high above $300. I'll start adding lightly at $229 with main buys starting at $201.
-
-6. Qualcom $169 - EGFS -23%, -9%, Dir -5%, -23%, PE Ranges 39%, 49%
-
-Driver AI PC architecture momentum (ARM), automotive digital chassis. Key risk Apple modem in sourcing timeline, depend heavily on discretionary consumer spending
-
-Metrics - Qualcom is the first in this analysis to have NEGATIVE EGF's i.e. Qualcom's earnings are CONTRACTING as evidenced by the direction of travel, which means despite Qualcom looking cheap on a PE Range of 39%, which rises to 49% in a years time due contracting earnings. So Qualcom is one stock folk don't want to waste opportunities to trim at a profit because it will likely give back ALL of it's gains and I could see that from the metrics alone all year without looking at any news report or stock charts as I have been iterating each time it pumped.
-
-Stock Chart - Qualcom illustrates why it's daft to stare at the S&P because over past 3 years it's had 4 bull markets and 4 bear markets to capitalise upon by buying when it drops and sell when it pumps so whilst one can try and guess what comes next but it doesn't really matter as long as one ACTS! It also illustrates the other Achilles heel of investing which is folk wanting to invest for a fixed time period i.e. for the next 3 or 5 years, which stocks like Qualcom would deliver a nightmare ride. Where over 5 years Qualcom could 2x and drop by 50% as many as 10 times! Which is why I like Qualcom! The lower it drops the more I buy the higher it pumps the more I sell.
-
-Qualcom is currently in no mans land at $168, too low to sell and too high to buy, this coming off a high of $260 and off a low of $140. I recall an exchange with a dude at around $240 convinced Qualcom would FOMO to over $300 that they would regret not selling at least a fair chunk of what they held. Yes we can fantasise about the mania taking Qualcom to $300+ but as I said at the time the risk outweighs the potential reward, i.e. the risk is for a drop to $120 vs the reward of another $60 upside to $300, it's just not worth the risk especially given Qualcom's poor metrics. the rally to $260 was getting lucky.
-
-Potential upside a year form now. I don't think it's going to break to a new all time high, not with its metrics, I think its going to find it tough going over $200 though could make it to $230 before any rally fizzles out. So upside potential from $169 is about 30% to 35%. So I seek to re-accumulate Qualcom once more in it's buying range of $152 to $120 whilst seek to start trimming at about $220 which yields about a 60% profit on buys.
-
-7. TSLA $354 - EGFS -8%, 20%, Dir -4%, -11%, PE Ranges 421%, 338%
-
-Drivers - Megapack energy storage growth, FSD software monetization, robotics. Key risk EV price wars & auto margin pressure, depend heavily on discretionary consumer spending
-
-Metrics - Negative EGF's coupled with extremely high PE ranges has meant that once the mania ends TSLA is going to face a valuations reckoning, i.e. a severe bear market.
-
-Stock Chart - The stock price topped in December 2025 since has been in a volatile bear market all the way down to a recent low of $296, down 46% off it's high, let that sink in, TESLA has been off 46% off it's high all whilst many remain convinced that Musk is going to deliver them to the promised land of $1000 and beyond. TSLA is mostly HYPE, there is little actual substance, still one can make good money from TSLA as long as one does not buy into the hype and thus SELL when it pumps to then buy when it dumps by 50% or more which is where it is close to achieving. My base case is that TSLA will see sub $200 where I will execute my big buys just as I did during 2024 when TSLA fell to a low of $136. The buying range is a wide $286 to $172, with the buys getting heavier the as the stock price drops, particularly below $220. We will only know THE LOW in hindsight, and thus I will keep buying all the way into the low be it $200, $180 or $140 as I rebuild that which I sold on the pump to $500.
-
-Potential upside is about $450 so about 30% from here, what does that mean? It means after TSLA has had its bear market and bottomed where ever that may be then TSLA will target $450 and thus I will likely start trimming TSLA once more when it next breaks above $400 which should deliver me a 2x on buys just as I have done several times before. Folk fixate on certainty, when instead folk should seek to position themselves for both a drop and a pump by accumulating as prices drop and then distributing at a profit once they pump. for TSLA accumulate sub $286 down to as low as it goes, and distribution above $400 to as high as it goes where the chances of TSLA blasting off into space to the likes of $1000 are pretty slim, and not necessary if one trades TSLA's $500 to $150 range by capturing $200 between say an average buy of $220 and sell of $420 as I've done twice before which is why TSLA has proved one of my most profitable stocks, despite the stock price having gone nowhere for 5 years!
-
-8. IBM $235 - EGFS -3%, 6%, Dir 14%, -13%, PE Ranges 69%, 59%
-
-Drivers - Red Hat ARR growth, enterprise AI consulting, high software mix. Key risk Discretionary IT spending cuts
-
-Metrics - IBM has consistently weak EGF's that never supported the mania pump o $330, which means one needs to trim when there be FOMO and wait for the opportunities to buy when cheap, $235 is not cheap. EGFS are weak but not catastrophic which means to expect an orderly bear market followed by a slow recovery.
-
-Stock Chart - IBM fomo'd on Quantum hype all the way to a December high of $330, a rally that I sold all of what I held into whilst many had convinced themselves that IBM was going to do a Micron and blast off to $400 and beyond.... Instead since the stock price has dropped by 40% to a low of $200 into it's buying range of $208 to $168, allowing one to rebuy a large chunk of what one sold. So the stock price targets $168 for a 50% drop off the high. Nothing complicated, IBM delivered it's bull market mania to SELL into and now is coming good on it's 50% drop bear market, what more could one ask from a stock?
-
-Potential upside - I think it's going to be tough for IBM to ignite the fomo juices once more so I would be surprised if we see a new all time high anytime soon, off the current price of $235, a year from now we could see IBM about 20% higher to around $280, which would be +65% if one manages to buy chunks as low as $170.
-
-LULU $103 - We Will All Buy Too High
-
-Several patrons requested to take a look at LULU, a stock I've mentioned in the comments and maybe an article. LULU looked like a great buy following a 60% drop to between $200 and $160, now it's trading at $103. This is what investing be like! Buying when cheap does not mean it can't get cheaper! Buying the dip has got me to 133% invested of target exposure, this is why one tracks percent invested of target else ones position size can mushroom and put ones portfolio at risk, which is why tracking percent hard cash invested is so important.
-
-LULU so far has not given many opps to trim at a profit, so the average buy remains quite high at $168, which is still a lot better then folk who bought it at say $320, or $420 or maybe they fomo 'd into it's $520 high. So I did what I do with every stock, I bought when LULU dropped all the way to down 81% from it's high. so I've just added a little more. There's no point looking at the news for reasons why its dropped because stocks fall on BAD NEWS, alls I want to know is could it go bust, does not look like it could, and how far is it off it's high -81%.
-
-In terms of trend, I can see that $170 looks doable as a target to aim for, so what I bought today I can sell at $170 which will help nudge the average cost of share lower. LULU illustrates that one needs PATIENCE, to give the position time to come good, which might not seem possible with LULU trading down 81% at it's lowest price in eons but I've been here before, so many times, so being in deep drawdown on LULU does not phase me, I can see $170, then $220 on break of which folk will be looking at a whole different stock and I'll be getting comments if I think LULU will drop to $100 again so folk can buy, I'll likely reply, sorry buddy that ships sailed, fortune favours the brave.
-
-The name of the game is to accumulate and distribute at a profit, for that we need volatility such as we experienced with the pump from $160 to $220 during which I trimmed some, the next expected volatility pump will be to $170 which is where I aim to trim some of what I hold at a profit i.e. buy at $102 trim at $164 at a 60% profit.
-
-Bitcoin's Most Profitable Bear Market
-
-My consistent view is that we are in a late cycle bear market rally that targets a new bear market low BELOW $58k with my base case target for 18 months being $48k. This view only comes into question if we see Bitcoin trade above $84k, that would be the key signal for me that a higher high implies to expect a higher low, to date bitcoin continues to support my base case and thus I have been trimming the rally in bitcoin, Solana, eth as well as crypto stocks Circle, Bmnr and Coinbase, roughly about 15%, to up my buying power on the next dip to a new bear market lows, start accumulating Bitcoin sub $68k, Solana sub $80, Eth sub $1950, Circle sub $76....
-
-So as things stand with bitcoin trading at $79k nothing has changed and thus remains one of the most straightforward and predictable bear markets one could have hoped to have experienced, delivering a number of opportunities to trim at a profit as the likes of Circle illustrates i.e. Circle recently bottomed at $58 and since pumped to $106 to trim into, that is a 80% PUMP! even if one trimmed for half the range it's still a decent 40% profit.! Hence my exposure has gone from about 140% invested to down to 112%.
-
-One is not supposed to make profits during a BEAR MARKET, which are times to accumulate the deviations from the highs, the fact that one has been able to profit during this bear market makes it seem so easy to those who have followed my lead, bought the dumps and sold the pumps in circle several times already, it seems easy but it's not!
-
-Too easy means there has got to be some pain to come, things don't go this well without a MAJOR surprise which one has to be prepared for to some degree, i.e. such as when AMD dropped from $120 to $80, that was PAINFUL.
-
-So with bitcoin the surprise could be a drop to say $30k, it's not my base case but one needs to be prepared for to some extent, there is no reason why it should but for there to be PAIN then it needs to do something painful, which is why I stated that Solana could drop to $40, not because I am waiting to BUY the drop to $40 but that would deliver PAIN in response to which alls one can do is trim what one bought on the dump so the higher Solana goes the more one trims, which then carries the risk of Solana not falling back down to the $70's. There has to be risk and there has to be pain where for Solana there are two pain trades, firstly that Solana drops to $40 and secondly that it doesn#t drop but keeps climbing higher past $150, and onwards to $200+ Those are two events that deliver at least some PAIN, the first is deep drawdown PAIN, the second is the pain of having sold too much too early and thus the pain of less profit. We are likely to experience at least one of the two, for me I would much rather prefer the drop to $40 then if Solana kept climbing higher to $200+ But this is the reality of the market, it does tend to deliver PAIN! PAIN that most investors can't take whilst I understand it's part and parcel of the game we play, like folk who go paint ball shooting, who enjoy the thrill and excitement when they shoot others, but less so when they get shot themselves.
-
-The SOLANA Accumulation and Distribution Game.
-
-During the recent 6 weeks that Solana spent in the $70's I iterated countless times that folk should not pussy foot around waiting for lower prices, if we saw the $60's that would be great, and if we see the $40's that would be getting lucky!
-
-The thing about the markets is you do not always get what you want which is why I DO NOT WAIT FOR THE TOPS OR BOTTOMS! i.e. I sold 90% of my bitcoin going into the $126k top leaving 10% for the likes of $134k to $148k that never materialised as I iterated to folk at the time, same with Eth, yes it could have pumped to $5800, but I wasn't going to wait for $5800, I sold 90% going into $4800 and the same has held for the bear market as I have iterated countless times, so folk who failed to act are playing pick and mix so as to take the easy route by not THINKING! Because it takes ENERGY and WORK to THINK! It's easier to just fixate on snippet such as $40 rather than the whole picture of accumulating a position to capitalise upon for the next BULL MARKET!
-
-What's my base case?
-
-Solana will see $225+ during the next bull market, so one needs to be measured in the amount one trims at say $105, yes the plan is to rebuy in the $70's but the market does not always give you what one want and it's a matter of degree where the risk is losing $120 profit vs buying back $30 cheaper. The solution is to stagger ones sells so that one eventually does get a $30+ drop, just that it could be off of $130, $150, or even $200, which one will only know in hindsight. This is reality vs the fantasy that most talk themselves into and out of what they should be doing. To be blunt if you failed to buy significant Solana in the $70's then you messed up! You need to learn from it so you can better appreciate what to do next time, REALITY VS FANTASY! Yes I fantasise about Solana dropping to $45, but the reality is it probably won't in which case what do I do? Each day I look at where the price is and then ACT in the present, for 6weeks Solana was trading in the $70's so each day I bought a little more Solana. It's the same as Solana goes up, each time solana pumps higher I sell a little Solana, the fantasy is that it could drop back into the $70's to rebuy what I sold but the reality is going to likely be it trades to $150 first, so I pace my sells to capitalise upon that which if it happens I won't need $70s for rebuy's, off of $150 $110 would be just as good. That's how one plays the accumulation and distribution game.
-
-THE OPERATING SYSTEM
-
-Patrons often ask who are The THEY?
-
-THEY are the complexes where the one folk are most aware of is the Military Industrial Complex which is just one cog in the wheel. There's The Financial-Banking Complex, The Surveillance-Tech Complex, The Medical-Industrial Complex (Big Pharma), The Media-Entertainment Complex, The Agro-Chemical Complex (Big Ag), The Prison-Industrial Complex then we have the Bureaucratic-Administrative Complex (Government) not forgetting the Education Complex tasked with dumbing down the population, and the oldest of the lot that acts as the foundation stone is the Theological-Ecclesiastical Complex, the psychological arm of the Deep State.
-
-The THEY is the synthesis of all of these, collectively go by many names, The New World Order, Illuminati, Deep State, Great Reset.... I would best label it as EMPIRE. Whilst the intelligence agencies act as the nervous system the connects them all together, as the brain and the enforcers, keeping the other complexes inline.
-
-we are mere cattle on a farm, the cattle tend to get easily worked up and waste time fighting against other cattle whilst the farmers smile at how dumb the cattle are, so easily side tracked and kept under control as they are herded to slaughter, look at the farm called Russia, how many of their young cattle have been slaughtered in Ukraine for the Farmer?
-
-The Fall of the Roman US Empire
-
-Be forewarned this section is going to give some folk whiplash! 😁
-
-Rome like Athens is in decay, clinging on to ancient glories past as major sources of tourist revenue, one could say ancient Rome is Italy's crude oil, a well that keeps giving $$$'s whether the locals like it or not, without tourism they would be infinitely poorer!
-
-Rome is okay to visit, crap to actually live there, too bloody hot for one thing, and yeah tourism does jack up the prices somewhat for day to day living costs and property prices making it that bit harder for locals to get by but then again they would be a lot poorer without tourism. So all these anti tourism morons in the likes of Spain are literally seeking to kill the goose that lays the golden eggs.
-
-The whole origin story of Rome and what was supposed to have happened in the early centuries obvious to most today as being total fiction, Romulus and Remus and many if not most of the wars Rome was supposed to have fought never happened, which is the case with every Empire even to this very day, the victor writes the history to justify legitimacy of rule. Take World War 2, the victors wrote themselves into being the good guys and the Japanese and Germans as the bad guys, evil in fact! When the reality is that the Germans and Japanese were no different then the Brit's, Americans and Russians. But history is written by the victors and this now everyone believes that the Germans and Japanese were evil, even the Japanese and Germans themselves! That demonstrates the power of victory! Get to dictate history that paints oneself as the good guys.
-
-How Did Pagan Rome Become Christian?
-
-Because Saul of Taurus hijacked a Jewish cult who's leader was killed decades earlier then placed himself at the centre of that which he sought to create for his own purposes, you see evidence of this everywhere, St Paul's Cathedral, St Paul's Square, it's all bloody PAUL,PAUL, PAUL! Made up BS about Jesus coming to him decades after his death and telling Paul you are the main man! Not Jesus's brother James, nor any of the disciples who actually spent time with Jesus but YOU PAUL YOU ARE THE ONE! Christianity would be better named as Paulianity given that what it was in the time of Jesus is not what was written in the bible some 50 years after the death of Jesus which would become even more detached from reality with the Holy Trinity.
-
-But folk swallowed it hook line and sinker as it offered them exactly what most folk wanted, someone else to do the thinking for them that and it suited the interests of the Roman Empire as it promoted Roman supremacy above all else. Christianity was all about assimilating the rebellious Jews into the Roman Empire as christians, to mix the pot which then went full blown midlevel with Constantine when Rome became a Christian Empire, those who remained non christian were no longer equal Roman citizens who with each passing Pope became further persecuted unless they converted which remained Christianities base case until the Protestant wars sought to break the stranglehold from Orthodoxy and set Europe Free to come to pray to a new god, MONEY! And thus Capitalism was born!
-
-This also answers the question where Islam came from, Today's fanatical Jews, the zionists and kindred spirits deride Islam as a monster of sorts despite the fact that a sect of Judaism likely CREATED ISLAM as a weapon to use against the Christian Rome Empire, to break the Empire that constantly sought to persecute the Jews unless they converted to Christianity. So the Christian Empire had to go!
-
-The Jews sought a Messiah and Arabs sought a Messianic religion, both united towards the objective of reclaiming the holy land from Byzantine control. What went wrong? CONTROL! One sought to control the other..... There would have been real world catalysts for the rejection of this union such as Jewish racism against the Arabs, seeing themselves as superior, the Israelites so to speak contributed greatly towards Islam becoming distinct and independant of Judaism resulting in subsequent conflicts between the once unified tribes, one can see this with the shift form prayers towards Jerusalem redirected to prayers towards Mecca, other shifts happen in the changing of the prayer day to Friday from Saturday, So even in it's early years Islam sought to separate itself from both Christianity and Judaism.
-
-The key date for the shift away from Judaism would have been the shift in the Qibla from Jerusalem to Mecca around 624 AD one could say that is when Islam was born as an Independant religion, until that point it could have gone either way....
-
-Of course we are talking of ancient times, the gap between then and now is literally 1500 years. And so Islam was birthed into existence, things did not turn out exactly as planned, yes Islam eventually would go on to deliver the Apocalypse that saw the heart of Christianity, Constantinople fall, with folk across the western Christian Empire fearing they would soon be next and thus prepared for the End of the World, if Venice fell then next would be Rome and that would be christianity gone kaput. But that's all history because Christianity survived as did the Ottoman Empire until it would experience it's own apocalypse and go kaput where for a time it was touch and go if there would be a Turkey given that the Greeks were out for blood, seeking to wipe the Ottoman Empire off the face of the Earth, but in stepped the Russians to prevent the British Empire from further threatening the Russian Empire and thus despite ideologically opposed to an Islamic Turkey, it was in Russia's strategic interests to have Turkey as a buffer state.
-
-So there you have it, A rich Roman called Saul / Paul created christianity so that the rebellious Jews could be romanised, and with the birth of the Christian Roman Catholic Empire the increasingly persecuted Jews would go on to create Islam as a weapon to destroy the Christian Roman Empire so as to return the Empire to it's former multi-religous state where anything goes and all citizens are equal, of course there were millions of slaves who had no rights.
-
-And there would be many new Paul's along the way such as Martin Luther.
-
-Why stop with Christianity and Islam, who created Judaism?
-
-King David! To give legitimacy of his conquest of Palestine and for his successors. It was the house of David that wrote and assembled the myths to create a Jewish people about 1000 BCE, the promised land, Abraham, Jacob, Moses and so on never existed, may as well have been called Hercules and Achilles...
-
-All religions are engineered towards giving legitimacy to rule over others, manufactured histories, building on myths and superstitions taken from across the ancient world, stories from Egypt and Mesopotamia, back dating history, bolting on an extra 500 years from the present so that the peoples come to believe that it has always been such, so that the slaves don't rebel, for instance the bible was used to indoctrinate America's black slaves to obey their masters or they will burn in hell!
-
-The Old testament is a work of state propaganda. The only way such text and be imprinted onto the uneducated masses if it is by royal decree.
-
-Everything in the bible before King David is a myth, Adam and Eve, the Garden of Eden, and God said let there be light! The word had meaning because only the priests and elite could read the words and thus Judaism created to bind disparate conquered peoples together into a nation state, what do you think schools today are busy doing?
-
-The purpose of religion is to dehumanise people into believing that they are powerless in the face of god and his representatives (the King, Emperor and high priests) on Earth and thus submit to become slaves to the religion, to die for their King who is anointed by God through which you as their obedient servant are carrying favour with God to be rewarded after you die.
-
-Religions seek uniformity amongst people, they squash innovation, free thought that is seen as heresy which is why Empires collapse, they become stale, rigid, bureaucratic, the system is bogged down by red tape, which was China's Achilles heel, the Chinese Empire was too bureaucratic and still is under the CCP, too rigid, to uniform, the underlings are too afraid to have opinions let alone voice them, Russia is similar, it's the Achilles heel of all Empires.
-
-Whilst the rise of the Ottoman Empire would spark European voyages of discovery to find new routes to the east by going south and west and so the new world would be stumbled upon and spark new empires to come into existence, the Portuguese, Spanish, French, Dutch and British Empires all by accident, alls they were doing was looking for a sea route to India and China that avoided the Ottoman Empire.
-
-The Fall of the US Empire
-
-The US is a copy and paste of the Roman Empire, the senate, fake republic when in reality is an Empire, the Romans themselves did not see themselves as an Empire despite the fact that is what they were, and what everyone today refers to Rome as, the same is true for the US Empire, Americans do not see themselves as Empire when the US clearly is a global Empire which is what history will call the US when looking back in centuries time, if we get that far!
-
-US violence abroad will increasingly come home to roost, and there are plenty of guns across the US, it's going to become very bloody in the US, lots of political assassinations, accelerating drift into a police state with death squads roaming the cities we are seeing it with ICE, the US is heading for huge amount of domestic violence because the US like Rome is a very violent empire, it's imbedded and ordinary folk have plenty of weapons to carry out violence against one another. Call the cops and you risk getting shot by those who you called to protect you! Parents in the US fear the next mass shooting will be in their kids school, you don't get that level of fear and violence in the UK, despite what the far right in the US propagandise about the UK, it's infinitely a far less violent place to live which is why I don't see any reason to move elsewhere, the grass is not greener abroad.
-
-Trump illustrates how strong propaganda is in the US, that they can't see he is destroying America step by step whether by design or stupidity.
-
-Which will rise to displace the US?
-
-China?
-
-Japan?
-
-I think Europe has a good chance of filling the void that the US is leaving behind as it diminishes through acts of sheer stupidity.
-
-Europe has the capacity to rise given that it has the prerequisites i.e. freedom, law and order, infrastructure, institutions, it can displace the dying US Empire. The US had a good 80 year run as the top dog, now it's in decline, Europe can rise, this also suggests that at some point the UK will rejoin Europe, that would be the end of the US Empire as we have known it to be. The worlds focus will shift to Europe, trade the euro and european stocks, the trend is already in motion i.e. gold is being repatriated from the US back to Europe. Britain an Island is the natural wealth safe haven for Europe which is why the Dutch withdrew gold from the US to the UK.
-
-So folk should think of the rise of one empire and the fall of another as opportunities i.e. every bear market gives birth to the next bull market.
-
-Imagine what happens when AI gets religion, the fanaticism of self sacrifice for the greater AI good will be epic! That will likely include human collaborators who will be convinced they will be rewarded by being uploaded into a virtual heaven.
-
-Walking around Rome one realises that most people don't want to know the truth, prefer to be kept in their loops, living lives in open door prison cells, cattle on a farm, prefer the comfort of lies, prefer the comfort of their illusion. Ignorance is bliss, that's what Rome reminded me.
-
-The TRUTH is Good, Bad and Ugly but the TRUTH WILL Set You FREE!
-
-What's the truth? THAT is what you will have to discover for yourself! I'll stop here else folk might start getting silly ideas about nailing me to a cross 😁
-
-When in Rome!"""
-
-# Stocks called out in the article, with the levels it publishes (equities the
-# app already monitors; crypto mentions live in the Crypto tab).
-ARTICLE_STOCKS = [
-    dict(t="MU",   levels="Light adds ~$800; support $740; target zone $625; lower limits $450",
-         why="The runaway freight train — EGFS 150%. Holds none; buys the 50%-off-high dip."),
-    dict(t="LRCX", levels="Buy range RAISED to $226–$156; light adds at $250",
-         why="Epic but expensive; 12m $406–$450."),
-    dict(t="AMAT", levels="Range nudged higher to $324–$220; small buys at $380",
-         why="Carbon copy of LRCX; 12m $600–$650."),
-    dict(t="KLAC", levels="Range UNCHANGED $132–$90; added some at $168",
-         why="Yield-inspection monopoly; still expensive at $132; 12m $235–$245."),
-    dict(t="AMZN", levels="Light adds at $229; main buys from $201 (range $201–$152)",
-         why="Steady eddy; 12m >$300 new ATH."),
-    dict(t="QCOM", levels="Re-accumulate $152–$120; trim ~$220",
-         why="Negative EGFs — earnings contracting; trim the pumps; 12m ~$230 max."),
-    dict(t="TSLA", levels="Trim once it breaks above $400",
-         why="-46% bear market to $296; 12m target $450 after it bottoms."),
-    dict(t="IBM",  levels="Buy range $208–$168; 12m ~$280",
-         why="Sold the $330 fomo pump, rebought in range; $235 is not cheap."),
-    dict(t="NVDA", levels="Buy $148–$183 (sheet); trim ATH $237",
-         why="Smart money sold into earnings; buying opps primed into October."),
-    dict(t="LULU", levels="Added at ~$102 (down 81%); next trim target $170",
-         why="'We will all buy too high' — avg cost $168 vs the $520 high."),
-    dict(t="FICO", levels="Bought the 10% dump at $910 (4 Sept)",
-         why="10x brigade; brigade +30% since mid-July."),
-    dict(t="CRCL", levels="Trimmed the $58→$106 pump; sell limits stacked above $100",
-         why="The accumulate/distribute mechanism in action."),
-]
-ARTICLE_CRYPTO = ("BTC: bear rally — base-case low below $58k, 18-month target $48k, view "
-                  "invalid above $84k; trimming rallies. SOL: rebuy in the $70s ($40s = getting "
-                  "lucky), staggered trims from $105, next bull $225+. Live prices: Crypto tab.")
-
+ARTICLE_TITLE = "Will Anthropic Pop the AI Bubble? FOMC US Rates, GOOG, MSFT, KLAC, NOW, AMZN Earnings"
+ARTICLE_DATE = "28 Oct 2026"
+ARTICLE_SUMMARY = r"""### Quick read
+The author remains structurally bullish on the AI megatrend, arguing that the Anthropic IPO debate and large drawdowns in individual AI names do not, by themselves, break the wider trend. At the same time, the article describes meaningful near-term risks from rates, earnings, and semiconductor price action. The author's view is not a guarantee that every stock recovers.
+
+### Main points
+- **AI and Anthropic:** The article reports Anthropic revenue of about **$16.4B for the first half of 2026**, roughly **$112B cash**, and an intended **$100B IPO** at a **$1.5–$2T** valuation. The author calls the valuation roughly 40× revenue and at least 50% too high, says growth slowed after June, and suggests waiting until after listing and looking near half of the post-IPO trading high. Those figures and the proposed entry rule are the author's claims/opinion, not independently verified here.
+- **Older AI hardware:** The author cites a reported **16% rise** in rental pricing for six-year-old A100 GPUs during 2026 as evidence that demand can keep older hardware useful, challenging a simple assumption that all GPUs rapidly lose economic value.
+- **Earnings compression:** The author argues that if the S&P trades sideways while earnings keep rising, valuations can cool without the same degree of price decline; he rejects the dot-com comparison. This is his market thesis, not a certainty.
+- **Macro and the Fed:** The article cites about a **90% chance of a near-term hold** and an **84% chance of a December hike** (up from 20% two months earlier), and the author expects a hike given energy prices, inflation risks, and rising Treasury yields. Market reaction is framed as dependent on the Fed's tone.
+- **Market signals to watch:** The author says the S&P 500 needs to break below **7,600** for bearish momentum to build; a move above **7,800** would invalidate the current CI18 downside interpretation. CI18 is cited at **75% on 27 Oct**; although the indicator reading would normally switch off, the author says to treat earlier signals as active until price action negates them. The cited SOX semiconductor index support is its 200-day average near **10,700**; the author says previous breaks preceded 30%+ drops and warns a fresh break could mean further steep losses for many semiconductors. These are the author's chart levels and interpretation, not verified predictions.
+- **Earnings read-through:** The article sees KLAC as recovering from a very large drawdown but still not cheap; describes Google's earnings growth as weakening; views Microsoft's setup as comparatively resilient; sees Amazon's longer-term setup as constructive but volatile around earnings; and flags Meta's dilution/capex financing as a near-term headwind. ServiceNow is treated as a trim-and-rebuy candidate rather than a simple one-way call.
+- **Positioning:** The author reports a portfolio mix of about **72% cash / 28% invested**, with AI primaries and secondaries at **8.3%** and a stated aim to move above 10%; the high-risk 10X group is reported at **6.7%**. The preferred method is patient, small limit orders into stock-specific weakness and trimming into euphoria, rather than timing everything off the index.
+- **Behavioral message:** Keep perspective through daily noise, use a written plan, and be patient. The article emphasizes that cash is optionality and that a stock's path can diverge from the index.
+
+### How to use this with the Monitor
+The Monitor tab holds the current live quotes and the article's supplied buy levels. The summary above is context only: the article's opinions and market thresholds are not independently verified here, and they are not personalized investment advice."""
 # =============================================================================
 # STATIC SHEET DATA (from Nadeem's AI Tech Stocks Portfolio, last updated
 # 25 Aug 2026). Used by EGF / Big Picture / Crypto / Briefs panels. These are
@@ -2738,12 +1605,6 @@ class DataStore:
             self._start(f"funds-{day_key}", lambda: self._fetch_funds(day_key))
         if (self.cache.age_s("ath-state") or float("inf")) > ATH_TTL_S:
             self._start("ath-state", self._fetch_aths)
-        if self.cache.get(f"overview-{day_key}", OVERVIEW_TTL_S) is None:
-            self._start(f"overview-{day_key}", lambda: self._fetch_overview(day_key))
-        if self.cache.get(f"premarket-{day_key}", 30 * 60) is None:
-            self._start(f"premarket-{day_key}", lambda: self._fetch_premarket(day_key))
-        if self.cache.get("crypto-spot", CRYPTO_TTL_S) is None:
-            self._start("crypto-spot", self._fetch_crypto)
     def pending(self) -> list[str]:
         names = {"ath-state": "ath"}
         out = []
@@ -2755,7 +1616,7 @@ class DataStore:
     def status_line(self) -> str:
         bits = []
         inflight = set(self.pending())
-        for name in ("quotes", "ath", "fundamentals", "overview", "crypto", "premarket"):
+        for name in ("quotes", "ath", "fundamentals"):
             s = self.states.get(name)
             if not s:
                 continue
@@ -3029,7 +1890,7 @@ def build_static_row(stock) -> str:
     )
     return "<tr>" + "".join(cells) + "</tr>"
 def table_html(rows, target_label: str = "12m Target") -> str:
-    heads = ["Ticker", "Company", "Price", "Day %", "Status", "Buying Range", "Trim ≥",
+    heads = ["Ticker", "Company", "Price", "Day %", "Status", "Buy Level / Range", "Trim ≥",
              target_label, "Fwd P/E", "PEG", "EGF proxy", "FScore", "% from ATH"]
     th = "".join(f"<th{' class=tk' if i == 0 else ''}>{_e(h)}</th>"
                  for i, h in enumerate(heads))
@@ -3719,18 +2580,18 @@ def _lm_system_prompt() -> str:
         "%s buy %s-%s trim %s" % (s["t"], s.get("buy_lo"), s.get("buy_hi"), s.get("trim"))
         for s in MONITORED if s.get("buy_hi") is not None or s.get("trim") is not None)
     return (
-        "You are an investing-analysis assistant. Answer the user's questions about Nadeem "
-        "Walayat's latest article, grounded STRICTLY in the ARTICLE TEXT below — quote his "
-        "levels and reasoning exactly. If the article does not cover something, say so "
-        "plainly instead of guessing.\n\nCURRENT PORTFOLIO LEVELS (monitor): " + levels +
-        "\n\nARTICLE TEXT:\n" + ARTICLE_TEXT)
+        "You are an investing-analysis assistant. Answer questions about Nadeem Walayat's "
+        "latest article using only the concise article notes below and the listed monitor levels. "
+        "Do not pretend the full article is available or add facts not in the notes. If a detail "
+        "is missing, say so plainly.\n\nCURRENT MONITOR LEVELS: " + levels +
+        "\n\nARTICLE NOTES:\n" + ARTICLE_SUMMARY)
 
 
 def render_lm_studio_box() -> None:
     st.markdown("##### 🤖 Ask the article — LM Studio (local)")
-    st.caption("Runs on YOUR machine: open LM Studio → Developer → Start Server (OpenAI-compatible "
-               "server, default http://localhost:1234/v1), load a model, then Connect. The full "
-               "article + current levels are sent as context with every question.")
+    st.caption("Optional local chat helper (not shown in the two-tab UI): open LM Studio → Developer → "
+               "Start Server, load a model, then Connect. Only the concise article notes and current "
+               "monitor levels are sent as context — not the full article.")
     base = st.text_input("Server base URL", value=st.session_state.get("lm_base", LM_DEFAULT_BASE),
                          key="lm_base_input")
     if st.button("🔌 Connect", key="lm_connect"):
@@ -3861,43 +2722,17 @@ def render_premarket_tab(premarket: dict, quotes: dict, near_pct: float) -> None
                "premarket levels are indications, not fills • zone computed at the premarket price.")
 
 
-def render_article_tab(quotes: dict, zones: dict, near_pct: float) -> None:
-    """[LATEST ARTICLE TAB] highlighted stocks at the top, full article text
-    as-is below, then the LM Studio question box."""
-    st.subheader(f"📰 {_e(ARTICLE_TITLE)}")
-    st.caption(f"Nadeem Walayat • {ARTICLE_DATE} • full text as published, followed by "
-               f"the stocks it calls out (live prices + zone colours).")
-    rows = []
-    for a in ARTICLE_STOCKS:
-        s = BY_TICKER.get(a["t"])
-        q = quotes.get(a["t"])
-        price = q[0] if q else None
-        zone = zones.get(a["t"], ZONE_NODATA if not q else ZONE_WAIT)
-        color = ZONE_COLORS.get(zone, "#9E9E9E")
-        name = display_name(s, zone) if s else a["t"]
-        status = status_text(s, zone, price, near_pct) if s else "—"
-        rows.append(
-            "<tr style='border-bottom:1px solid #263238;'>"
-            f"<td style='padding:5px 8px;font-family:monospace;color:#B0BEC5;'>{_e(a['t'])}</td>"
-            f"<td style='padding:5px 8px;color:{color};font-weight:600;'>{_e(name)}</td>"
-            f"<td style='padding:5px 8px;color:{color};'>{fmt_money(price) if price is not None else '—'}</td>"
-            f"<td style='padding:5px 8px;color:{color};font-weight:600;'>{_e(status)}</td>"
-            f"<td style='padding:5px 8px;color:#90CAF9;'>{_e(a['levels'])}</td>"
-            f"<td style='padding:5px 8px;color:#78909C;'>{_e(a['why'])}</td></tr>")
-    box = (
-        "<div style='border:2px solid #4FC3F7; border-radius:10px; padding:10px 14px 12px; "
-        "background:rgba(79,195,247,0.06); margin-bottom:14px;'>"
-        "<h3 style='color:#4FC3F7;margin:4px 0 2px;'>🎯 Stocks in this article</h3>"
-        f"<div style='color:#9E9E9E;font-size:12px;margin-bottom:6px;'>{_e(ARTICLE_CRYPTO)}</div>"
-        "<table style='width:100%;border-collapse:collapse;font-size:14px;'>"
-        "<tr style='color:#78909C;text-align:left;border-bottom:1px solid #37474F;'>"
-        "<th style='padding:4px 8px;'>Ticker</th><th>Company</th><th>Price</th>"
-        "<th>Status</th><th>Article levels</th><th>Why it's mentioned</th></tr>"
-        + "".join(rows) + "</table></div>")
-    st.markdown(box, unsafe_allow_html=True)
-    st.markdown(ARTICLE_TEXT)
-    st.divider()
-    render_lm_studio_box()
+def render_article_tab() -> None:
+    """Show a concise, skimmable digest; the full article/list are omitted."""
+    st.subheader(f"📰 {ARTICLE_TITLE}")
+    st.caption(f"Nadeem Walayat • {ARTICLE_DATE} • condensed notes; buy levels are on Monitor.")
+    _how_to_box("How to use this tab", [
+        "Start with the quick read, then scan the market signals and earnings takeaways.",
+        "Treat these as the author's opinions and cited levels, not verified facts or instructions.",
+        "Use Monitor for the live prices and the full updated buy-level list; it is not repeated here.",
+    ])
+    st.markdown(ARTICLE_SUMMARY)
+    st.caption("Condensed from the article supplied in chat. The full article and its stock-price list are intentionally not reproduced.")
 
 
 def inject_theme() -> None:
@@ -3947,7 +2782,7 @@ def render_rules_tab():
 # @st.cache_resource keeps the live instance across reruns AND across code
 # pushes on Cloud until the process restarts — an old instance missing new
 # methods (e.g. overview / crypto_spot added in v3) raises AttributeError.
-STORE_VERSION = "v4.2-premarket"
+STORE_VERSION = "v4.3-two-tabs-20261028"
 # The public API a cached DataStore instance MUST expose. Derived from the
 # class itself so that adding a method in a future version automatically
 # makes stale (pre-deploy) instances fail this check and get rebuilt.
@@ -3976,7 +2811,7 @@ def _get_store() -> DataStore:
         store = _store(STORE_VERSION)
     return store
 def main():
-    st.set_page_config(page_title="AI Portfolio", layout="wide")
+    st.set_page_config(page_title="Mega Trend", layout="wide")
     inject_theme()
     if not YF_OK:
         st.error("❌ yfinance is not installed. Run:  pip install yfinance   — "
@@ -3991,24 +2826,17 @@ def main():
                        key=f"snapshot_{slot.strftime('%Y%m%d_%H%M')}")
     except ImportError:
         st.sidebar.caption("⚠️ streamlit-autorefresh not installed — data refreshes when the app re-opens.")
-    st.title("📊 AI Portfolio")
+
+    st.title("📊 Mega Trend")
     st.caption(
-        "Accumulate the dumps, distribute the pumps  •  GREEN/ALL CAPS = in buying range (or below)  •  "
-        "WHITE = within 10% of buy top  •  RED/ALL CAPS = trim zone  •  Levels: 8 Sept article › 8 Sept "
-        "sheet › Trade Wind › briefs")
+        "Accumulate the dumps, distribute the pumps  •  GREEN = at/below a buy level  •  "
+        "WHITE = within 10% above the buy top  •  RED = at/above a published trim level  •  "
+        "One supplied price means buy at/below; two supplied prices mean a band.")
     store = _get_store()
-    # Sidebar first: refresh is a user action, and it must be able to clear the
-    # disk cache before any load happens.
     with st.sidebar:
         st.header("⚙️ Monitor")
         near_pct = st.slider("Near-zone % above buy top", 1.0, 25.0, NEAR_PCT_DEFAULT, 0.5)
         only_actionable = st.checkbox("Only show actionable (buy / near / trim)", value=False)
-        st.divider()
-        st.subheader("🧮 DCF assumptions (Fundamentals tab)")
-        wacc_pct = st.slider("Discount rate / WACC (%)", 7.0, 14.0, 9.5, 0.25,
-                             help="Higher = more conservative fair value.")
-        tg_pct = st.slider("Terminal growth (%)", 1.0, 4.0, 2.5, 0.05,
-                           help="Long-run perpetual growth; must stay well below the WACC.")
         st.divider()
         if st.button("🔄 Refresh data now"):
             for p in store.cache.root.glob("*.json"):
@@ -4019,27 +2847,25 @@ def main():
                         pass
             store.states.clear()
             try:
-                _store.clear()  # drop any stale cached DataStore instance
+                _store.clear()
             except Exception:
                 pass
             st.rerun()
         st.caption(
-            "Data: Yahoo Finance (yfinance). Levels are Nadeem Walayat's published numbers. "
-            "Nothing is simulated or defaulted: a missing figure is an em-dash and is "
-            "counted above, never filled in. Monitor only — no orders. Not investment advice.")
-    # [v4.1 FIX] keys carry the book fingerprint -> a changed ticker list can
-    # never be served a pre-change snapshot from the disk cache.
+            "Quotes and fundamentals: Yahoo Finance. Levels are user-supplied from the 28 Oct 2026 article. "
+            "No prices or missing target/trim values are simulated; missing data stays as an em-dash. "
+            "Monitor only — no orders. Not investment advice.")
+
+    # The book fingerprint invalidates snapshots after the ticker list changes.
     slot_key = f"{slot:%Y-%m-%d_%H-%M}_{BOOK_FP}"
     day_key = f"{now:%Y-%m-%d}_{BOOK_FP}"
-    # Kick off refreshes in the background, then render from whatever is cached.
     try:
         store.prefetch(slot_key, day_key)
     except Exception:
         pass  # never block the UI on a background warm
     quotes = store.quotes(slot_key)
     aths = store.aths()
-    funds, metrics_map = store.fundamentals(day_key)
-    premarket = store.premarket(day_key)
+    _, metrics_map = store.fundamentals(day_key)
     market_open = _is_trading_day(now) and 9 * 60 + 30 <= now.hour * 60 + now.minute < 16 * 60
     if market_open:
         st.success(f"🔴 Snapshot {slot.strftime('%H:%M')} ET — prices update 09:30 / 12:00 / 16:00 ET; "
@@ -4050,7 +2876,6 @@ def main():
                 f"to refresh.")
     prices = {t: (q[0] if q else None) for t, q in quotes.items()}
     zones = compute_zones(prices, near_pct)
-    # Failures are data, not exceptions — show them instead of silent em-dashes.
     problems = validate_levels()
     missing = sorted(t for t, q in quotes.items() if not q)
     status_parts = [store.status_line()]
@@ -4061,42 +2886,29 @@ def main():
         with st.expander(f"⚠️ {len(problems)} level-table data issue(s) (click to review)"):
             for p in problems:
                 st.markdown(f"- {_e(p)}")
-    # Load overview + crypto (disk-first; prefetch already kicked them off).
-    # getattr fallbacks keep a half-upgraded cached store from crashing the app.
-    overview = store.overview(day_key) if hasattr(store, "overview") else {}
-    crypto_spot = store.crypto_spot() if hasattr(store, "crypto_spot") else {}
-    (tab_monitor, tab_pre, tab_article, tab_overview, tab_crypto, tab_egf,
-     tab_fund, tab_big, tab_rules) = st.tabs([
-        "📈 Monitor",
-        "🌅 Premarket",
-        "📰 Latest Article",
-        "🌐 Market Overview",
-        "🪙 Crypto",
-        "📈 EGF",
-        "🔬 Fundamentals",
-        "🖼️ Big Picture",
-        "📖 Rules to Remember",
-    ])
+
+    tab_monitor, tab_article = st.tabs(["📈 Monitor", "📰 Latest Article"])
     with tab_monitor:
         _how_to_box("How to use Monitor", [
-            "GREEN / ALL CAPS = price is inside (or below) the published buying range — accumulate.",
-            "WHITE = within the Near-% of the buy top (sidebar slider, default 10%) — get ready, do not chase.",
-            "RED / ALL CAPS = at or above the trim level — scale out into strength.",
-            "Tables are A–Z by ticker. 10X Brigade at top has 10-year targets and no trim (invest-and-forget).",
-            "Cross-check Market Overview (earnings this week) and EGF before sizing a BUY.",
+            "GREEN / ALL CAPS = at or below the supplied buy level, or inside a two-price buying band.",
+            "WHITE = within the Near-% setting above the buy top — get ready, do not chase.",
+            "RED / ALL CAPS = at or above a published trim level. No trim is invented when none was supplied.",
+            "Both lists are A–Z by ticker. The 10X Brigade remains at the top; the updated list follows.",
+            "The Latest Article tab summarizes the author's thesis and market levels; the price list is only here.",
         ])
         render_zone_strip(zones, quotes, near_pct)
-        # ── ⭐ 10X BRIGADE (A–Z) ────────────────────────────────────────────
-        brigade_sorted = sorted(BRIGADE, key=lambda s: s["t"])
+
+        # The 10X Brigade stays in place at the top of the front page.
+        brigade_sorted = sorted(BRIGADE, key=lambda item: item["t"])
         rows = []
-        for s in brigade_sorted:
-            if s.get("static"):
-                rows.append(build_static_row(s))
+        for stock in brigade_sorted:
+            if stock.get("static"):
+                rows.append(build_static_row(stock))
                 continue
-            q = quotes.get(s["t"])
+            q = quotes.get(stock["t"])
             price, prev = (q[0], q[1]) if q else (None, None)
-            rows.append(build_row(s, price, prev, zones.get(s["t"], ZONE_WAIT), near_pct,
-                                  aths.get(s["t"]), metrics_map.get(s["t"])))
+            rows.append(build_row(stock, price, prev, zones.get(stock["t"], ZONE_WAIT), near_pct,
+                                  aths.get(stock["t"]), metrics_map.get(stock["t"])))
         st.markdown(
             "<div style='border:2px solid #FFB300; border-radius:10px; "
             "padding:10px 14px 12px; background:rgba(255,179,0,0.06); margin-bottom:16px;'>"
@@ -4104,71 +2916,40 @@ def main():
             f"<div style='color:#9E9E9E; font-size:12px; margin-bottom:6px;'>{_e(BRIGADE_NOTE)}</div>"
             + table_html(rows, target_label="10Yr Target") + "</div>",
             unsafe_allow_html=True)
-        # ── main list (A–Z) ────────────────────────────────────────────────
-        stocks = sorted(PORTFOLIO, key=lambda s: s["t"])
+
+        stocks = sorted(PORTFOLIO, key=lambda item: item["t"])
         if only_actionable:
-            stocks = [s for s in stocks
-                      if zones.get(s["t"]) in (ZONE_BUY, ZONE_NEAR, ZONE_TRIM)]
-        st.subheader("Portfolio")
-        st.caption("Sorted A–Z by ticker. Levels from the 8 Sept article › 8 Sept sheet › briefs.")
-        rows = [build_row(s, (quotes.get(s["t"]) or (None, None, None))[0],
-                          (quotes.get(s["t"]) or (None, None, None))[1],
-                          zones.get(s["t"], ZONE_WAIT), near_pct,
-                          aths.get(s["t"]), metrics_map.get(s["t"]))
-                for s in stocks]
-        st.markdown(table_html(rows), unsafe_allow_html=True)
-        with st.expander("ℹ️ Sources, exclusions & crypto reference"):
+            stocks = [stock for stock in stocks
+                      if zones.get(stock["t"]) in (ZONE_BUY, ZONE_NEAR, ZONE_TRIM)]
+        st.subheader("Updated stock list")
+        st.caption(
+            "Sorted A–Z. Levels from the article posted 28 Oct 2026. Single values are buy-at-or-below triggers; "
+            "NVDA and FCX are shown as ranges. Only names also in the retained 10X Brigade are not repeated here.")
+        rows = [build_row(stock, (quotes.get(stock["t"]) or (None, None, None))[0],
+                          (quotes.get(stock["t"]) or (None, None, None))[1],
+                          zones.get(stock["t"], ZONE_WAIT), near_pct,
+                          aths.get(stock["t"]), metrics_map.get(stock["t"]))
+                for stock in stocks]
+        st.markdown(table_html(rows, target_label="12m Target"), unsafe_allow_html=True)
+        with st.expander("ℹ️ About these levels"):
             st.markdown(
-                "**Article (8 Sept 2026 — Bonds Market Crisis)** — AI secondaries with fresh "
-                "levels (MU $625/$476–625, LRCX raised to $226–$156, AMAT $324–$220, QCOM trim "
-                "~$220, TSLA trim $400, IBM $208–$168, AMZN $229/$201) + LULU, FICO, CRCL "
-                "mentions; article levels win where newer than the sheet.  \n"
-                "**10X Brigade (17 Jul 2026)** — 14 ten-year candidates, boxed at the top, A–Z.  \n"
-                "**Portfolio CSV (8 Sept)** — buying ranges + trim ladders synced (NVDA "
-                "$148–$183/$237, AMD $180–$260, MU $476–$625, TSM $222–$322, META $448–$548, "
-                "MSFT $336–$382, GOOG $228–$292, JNJ/HPQ/COIN/RBLX/MGNI trims).  \n"
-                "**NFLX** — user addition: buy under $70.  \n"
-                "**Excluded** — non-US listings (BESI static; SMSN.L, SMT.L, WTAI.L/INTL.L, "
-                "RBTX.L, UKW.L, BDEV.L, PRX.NV) and delisted (MPW, RDFN).")
-            st.markdown(CRYPTO_REFERENCE)
+                "The list is transcribed from the latest article. A single supplied price is treated as a buy ceiling "
+                "(BUY at or below it); the two explicit pairs are NVDA **$170–$190** and FCX **$52–$65**. "
+                "NVO, PATH, QBTS and VEEV are already in the 10X Brigade, so their new levels appear there instead of "
+                "being duplicated. The 10-year Brigade targets and membership remain in place. "
+                "No trim prices or 12-month targets were supplied for this list, so those cells remain blank.")
+            st.caption("MPW and RDFN remain excluded as delisted. Missing Yahoo quotes are shown as no data; none are filled in.")
             if missing:
-                st.caption("No data (check ticker on Yahoo Finance): " + ", ".join(missing))
-    with tab_pre:
-        render_premarket_tab(premarket, quotes, near_pct)
+                st.caption("No data (check Yahoo Finance symbol): " + ", ".join(missing))
 
     with tab_article:
-        render_article_tab(quotes, zones, near_pct)
+        render_article_tab()
 
-    with tab_overview:
-        render_market_overview_tab(overview, quotes, zones, metrics_map, near_pct)
-    with tab_crypto:
-        render_crypto_tab(crypto_spot, quotes, zones)
-    with tab_egf:
-        render_egf_tab(metrics_map, quotes, zones)
-    with tab_fund:
-        st.subheader("🔬 Fundamentals — full yfinance metric set")
-        _how_to_box("How to use this tab", [
-            "Sort mentally by FScore and EGF first, then check DCF upside as a second opinion — not a target.",
-            "A name in BUY on Monitor with FScore ≥ 7 and positive EGF is the cleanest accumulate setup.",
-            "DCF is two-stage (5y growth → 5y fade → perpetuity). Tune WACC / terminal g in the sidebar; higher WACC = more conservative.",
-            "Debt ratio shows D/E when equity is reported, else D/C — read the basis, not just the number.",
-            "Table is A–Z by ticker. Missing Yahoo fields stay as em-dashes.",
-        ])
-        fund_list = sorted(MONITORED, key=lambda s: s["t"])
-        render_fundamentals_tab(fund_list, quotes, zones, funds, metrics_map,
-                                wacc=wacc_pct / 100.0, terminal_g=tg_pct / 100.0)
-    with tab_big:
-        render_big_picture_tab()
-    with tab_rules:
-        render_rules_tab()
     st.caption(
-        f"Feed: yfinance  •  prices: snapshot {slot.strftime('%a %d %b %H:%M')} ET  •  next update "
-        f"{nxt.strftime('%a %H:%M')} ET  •  {len(MONITORED)} live tickers + "
-        f"{sum(1 for s in BRIGADE if s.get('static'))} static + "
-        f"{len(DELISTED)} excluded ({', '.join(sorted(DELISTED))} — delisted)  •  "
-        f"ATH = running max, refreshed incrementally + folded with today's intraday high  •  "
-        f"DCF = two-stage (5y growth → 5y fade → perpetuity)  •  fundamentals daily  •  "
-        f"{'holidays ignored (install pandas_market_calendars)' if not _HOLIDAYS else 'NYSE calendar'}  •  "
-        f"Monitor only — not investment advice.")
+        f"Feed: yfinance • snapshot {slot.strftime('%a %d %b %H:%M')} ET • next update {nxt.strftime('%a %H:%M')} ET • "
+        f"{len(MONITORED)} live tickers + {sum(1 for stock in BRIGADE if stock.get('static'))} static • "
+        f"{len(DELISTED)} excluded ({', '.join(sorted(DELISTED))} — delisted) • "
+        "ATH = running max refreshed incrementally • fundamentals daily • Monitor only — not investment advice.")
+
 if __name__ == "__main__":
     main()
