@@ -388,24 +388,14 @@ def fetch_auto_inputs(ticker: str, *, force_refresh: bool = False) -> tuple[dict
                 f"{cagr_exc}; info error: {info_error or 'earningsGrowth not reported'}",
             )
 
-    # 2) Sector P/E is not provided directly by Yahoo: transparently use the
-    # company's forward P/E (preferred) or trailing P/E as an editable proxy.
-    sector_pe = _finite_number(info.get("forwardPE"))
-    pe_field = "forwardPE"
-    if sector_pe is None:
-        sector_pe = _finite_number(info.get("trailingPE"))
-        pe_field = "trailingPE"
-    if sector_pe is not None:
-        records["SECTOR_PE"] = _record(
-            "SECTOR_PE", sector_pe,
-            f"yfinance info['{pe_field}'] — stock P/E used as sector proxy",
-            f"Company sector reported by Yahoo: {sector}. This is not a sector median; override recommended.",
-        )
-    else:
-        records["SECTOR_PE"] = _missing_record(
-            "SECTOR_PE", "FETCH FAILED — info.forwardPE and info.trailingPE unavailable",
-            info_error or "Yahoo did not report either P/E field; enter a sector P/E manually.",
-        )
+    # 2) Do NOT substitute company-level forwardPE/trailingPE for the
+    # workbook's sector-level P/E on current-year EPS. Yahoo does not expose
+    # the same sector metric, and the difference can materially change IV.
+    records["SECTOR_PE"] = _missing_record(
+        "SECTOR_PE",
+        "NOT FETCHED — Yahoo does not provide Schwab's sector P/E",
+        f"Yahoo reports the company sector as {sector}, but its forwardPE/trailingPE are company-level ratios, not the sector P/E. Enter Schwab's current-year sector P/E manually.",
+    )
 
     # 3) Beta.
     beta = _finite_number(info.get("beta"))
@@ -633,7 +623,7 @@ def render_intrinsic_value_tab() -> None:
     st.caption("Workbook-style intrinsic value estimate. Auto-filled values are editable; missing data is never guessed.")
     st.info(
         "Yahoo values can be stale, missing, or wrong—especially for small caps and non-U.S. tickers. "
-        "The stock's own P/E is only a proxy when a sector P/E is unavailable; override it if you have Schwab's sector P/E. "
+        "Yahoo does not provide Schwab's sector P/E, so that field is intentionally left blank for manual entry. "
         "Yahoo earningsGrowth is often 1-year YoY, not the requested 5-year GAAP CAGR. Treasury is stored as yield × 10."
     )
 

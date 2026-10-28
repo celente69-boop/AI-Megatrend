@@ -101,9 +101,9 @@ def test_auto_fill_sources_are_labeled_and_timestamped(monkeypatch):
     assert ticker == "TEST" and currency == "USD"
     assert records["EPS_GROWTH"].source.startswith("yfinance annual income_stmt")
     assert records["EPS_GROWTH"].value == pytest.approx(((6 / 2) ** 0.25 - 1) * 100)
-    assert records["SECTOR_PE"].value == 22.0
-    assert "sector proxy" in records["SECTOR_PE"].source
-    assert "override recommended" in records["SECTOR_PE"].note
+    assert records["SECTOR_PE"].value is None
+    assert "NOT FETCHED" in records["SECTOR_PE"].source
+    assert "not the sector P/E" in records["SECTOR_PE"].note
     assert records["TREASURY"].value == pytest.approx(43.0)
     assert "4.3000%" in records["TREASURY"].note and "43.0000" in records["TREASURY"].note
     assert records["STOCK_PRICE"].value == 100.0
