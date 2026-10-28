@@ -1,10 +1,10 @@
 """
-Nadeem Walayat Mega Trend Monitor — two-tab edition (28 Oct 2026).
+Nadeem Walayat Mega Trend Monitor — three-tab edition (28 Oct 2026).
 Streamlit app powered by yfinance (REAL market data — no synthetic fallback).
 CURRENT BUILD
 -------------
-* Exactly two tabs: Monitor and Latest Article. Premarket, market overview,
-  crypto, EGF, fundamentals, big-picture and rules tabs are removed from the UI.
+* Three tabs: Monitor, Latest Article, and Intrinsic Value Calculator. Premarket,
+  market overview, crypto, EGF, fundamentals, big-picture and rules tabs are removed from the UI.
 * The 10X Brigade remains at the top of Monitor; the regular stock list is the
   user's 28 Oct published-price list, sorted A–Z.
 * One supplied price means BUY at or below that level. Two supplied prices mean
@@ -123,6 +123,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 import numpy as np
 import pandas as pd
 import streamlit as st
+from intrinsic_value_calculator import render_intrinsic_value_tab
 try:
     import yfinance as yf
     YF_OK = True
@@ -2589,7 +2590,7 @@ def _lm_system_prompt() -> str:
 
 def render_lm_studio_box() -> None:
     st.markdown("##### 🤖 Ask the article — LM Studio (local)")
-    st.caption("Optional local chat helper (not shown in the two-tab UI): open LM Studio → Developer → "
+    st.caption("Optional local chat helper (not shown in the three-tab UI): open LM Studio → Developer → "
                "Start Server, load a model, then Connect. Only the concise article notes and current "
                "monitor levels are sent as context — not the full article.")
     base = st.text_input("Server base URL", value=st.session_state.get("lm_base", LM_DEFAULT_BASE),
@@ -2782,7 +2783,7 @@ def render_rules_tab():
 # @st.cache_resource keeps the live instance across reruns AND across code
 # pushes on Cloud until the process restarts — an old instance missing new
 # methods (e.g. overview / crypto_spot added in v3) raises AttributeError.
-STORE_VERSION = "v4.3-two-tabs-20261028"
+STORE_VERSION = "v4.4-intrinsic-20261028"
 # The public API a cached DataStore instance MUST expose. Derived from the
 # class itself so that adding a method in a future version automatically
 # makes stale (pre-deploy) instances fail this check and get rebuilt.
@@ -2887,7 +2888,9 @@ def main():
             for p in problems:
                 st.markdown(f"- {_e(p)}")
 
-    tab_monitor, tab_article = st.tabs(["📈 Monitor", "📰 Latest Article"])
+    tab_monitor, tab_article, tab_intrinsic = st.tabs([
+        "📈 Monitor", "📰 Latest Article", "🧮 Intrinsic Value Calculator"
+    ])
     with tab_monitor:
         _how_to_box("How to use Monitor", [
             "GREEN / ALL CAPS = at or below the supplied buy level, or inside a two-price buying band.",
@@ -2944,6 +2947,9 @@ def main():
 
     with tab_article:
         render_article_tab()
+
+    with tab_intrinsic:
+        render_intrinsic_value_tab()
 
     st.caption(
         f"Feed: yfinance • snapshot {slot.strftime('%a %d %b %H:%M')} ET • next update {nxt.strftime('%a %H:%M')} ET • "

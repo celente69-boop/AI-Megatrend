@@ -1,6 +1,5 @@
-streamlit
-pandas
-numpy
-yfinance
-plotly
-streamlit-autorefresh
+# Streamlit Community Cloud dependencies for megatrend.py
+streamlit>=1.50
+yfinance>=0.2.40
+pandas>=2.0
+numpy>=1.26
